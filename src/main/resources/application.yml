@@ -12,16 +12,15 @@ spring:
     hikari:
       # Fail in 5s, not the default 30s, when the database is unreachable.
       connection-timeout: 5000
-  sql:
-    init:
-      # Adds database-side constraints after Hibernate has made the tables. See db/postgres-constraints.sql.
-      mode: always
-      schema-locations: classpath:db/postgres-constraints.sql
-      separator: ";;"
+  flyway:
+    # Schema lives in src/main/resources/db/migration. A database that was built before Flyway
+    # (tables exist, no history table) is marked as already at V1 instead of being rebuilt.
+    baseline-on-migrate: true
+    baseline-version: 1
   jpa:
-    defer-datasource-initialization: true
     hibernate:
-      ddl-auto: update
+      # Hibernate only checks that entities match the migrated schema. It never changes tables.
+      ddl-auto: validate
     show-sql: false
   jackson:
     deserialization:

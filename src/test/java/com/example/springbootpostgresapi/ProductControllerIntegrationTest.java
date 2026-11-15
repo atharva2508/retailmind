@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -829,6 +830,66 @@ class ProductControllerIntegrationTest {
                         .content("{\"message\":\"hello\",\"storeId\":1}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.toolCalls", empty()));
+    }
+
+    @Test
+    void refusalsExplainThemselves() throws Exception {
+        mockMvc.perform(post("/api/proposals/999999/review").header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error", containsString("Proposal not found")));
+        mockMvc.perform(get("/api/audit/events").header("Authorization", "Bearer " + tokenFor("user", "user123")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error", notNullValue()));
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + tokenFor("user", "user123"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fields.message", notNullValue()));
+    }
+
+    @Test
+    void deletingAProductWithHistoryGivesAClearConflict() throws Exception {
+        Product mouse = productRepository.findBySku("SKU-1001").orElseThrow();
+        mockMvc.perform(delete("/api/products/" + mouse.getId()).header("Authorization", "Bearer " + tokenFor("admin", "admin123")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error", containsString("history")));
+    }
+
+    @Test
+    void managerAndReviewerCanReadProductsAndReviewerCanChat() throws Exception {
+        String reviewer = tokenFor("reviewer", "reviewer123");
+        mockMvc.perform(get("/api/products").header("Authorization", "Bearer " + tokenFor("store_manager", "manager123"))).andExpect(status().isOk());
+        mockMvc.perform(get("/api/products").header("Authorization", "Bearer " + reviewer)).andExpect(status().isOk());
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + reviewer)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"low stock\"}"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void storeManagerDoesNotSeeLoginEventsOfOtherUsers() throws Exception {
+        tokenFor("user", "user123");
+        mockMvc.perform(get("/api/audit/events").header("Authorization", "Bearer " + tokenFor("store_manager", "manager123")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.actionType =~ /LOGIN.*/)]").isEmpty());
+    }
+
+    @Test
+    void fulfillmentRangeMustBeInOrder() throws Exception {
+        mockMvc.perform(get("/api/fulfillment-issues").param("from", "2030-01-01").param("to", "2020-01-01")
+                        .header("Authorization", "Bearer " + tokenFor("admin", "admin123")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void dashboardSaysWhenItHasNoOrOldData() throws Exception {
+        String admin = tokenFor("admin", "admin123");
+        mockMvc.perform(get("/api/dashboard/summary").param("storeId", "3").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dataStatus", is("NO_DATA")))
+                .andExpect(jsonPath("$.status", is("NO_DATA")));
+        mockMvc.perform(get("/api/dashboard/summary").param("storeId", "1").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dataStatus", is("STALE")));
     }
 
     private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {

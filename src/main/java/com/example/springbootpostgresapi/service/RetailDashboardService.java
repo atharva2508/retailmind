@@ -34,7 +34,11 @@ public class RetailDashboardService {
         summary.put("pendingProposalCount", pendingProposals.size());
         summary.put("discountSuggestionCount", Math.max(discountSuggestions.size(), 0));
         summary.put("reconciliation", reconciliation);
-        summary.put("status", lowStock.size() > 0 || fulfillmentIssues.size() > 0 || pendingProposals.size() > 0 ? "ACTION_REQUIRED" : "STABLE");
+        String dataStatus = inventoryService.storeDataStatus(storeId);
+        summary.put("dataStatus", dataStatus);
+        // An empty low-stock list from a store with no snapshots is not a stable store.
+        summary.put("status", lowStock.size() > 0 || fulfillmentIssues.size() > 0 || pendingProposals.size() > 0 ? "ACTION_REQUIRED"
+                : "NO_DATA".equals(dataStatus) ? "NO_DATA" : "STABLE");
         summary.put("recommendedActions", buildRecommendedActions(lowStock, fulfillmentIssues, pendingProposals));
         return summary;
     }

@@ -207,6 +207,12 @@ public class InventoryService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Store not found: " + storeId));
     }
 
+    /** Freshness of the newest snapshot of the whole store. */
+    public String storeDataStatus(Long storeId) {
+        return dataStatus(stockSnapshotRepository.findByStoreId(storeId).stream()
+                .max(Comparator.comparing(StockSnapshot::getBusinessDate)).orElse(null));
+    }
+
     /** NO_DATA: no snapshot. STALE: newest snapshot is older than yesterday. FRESH otherwise. */
     public static String dataStatus(StockSnapshot snapshot) {
         if (snapshot == null) {

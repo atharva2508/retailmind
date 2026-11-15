@@ -110,7 +110,7 @@ public class AuthService {
     // The typed username is attacker-controlled, so cap it before it goes into the audit table.
     private void auditLogin(String action, String username, User user) {
         String actor = username == null ? "" : username.substring(0, Math.min(username.length(), 100));
-        auditEventService.log(action, "USER", user == null ? null : user.getId(), user == null ? null : user.getStoreId(), actor, action);
+        auditEventService.log(action, "USER", user == null ? null : user.getId(), null, actor, action);
     }
 
     @Transactional(noRollbackFor = ResponseStatusException.class)

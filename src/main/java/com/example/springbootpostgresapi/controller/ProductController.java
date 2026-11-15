@@ -30,14 +30,14 @@ public class ProductController {
     private final StoreAccessService storeAccessService;
 
     @GetMapping("/products")
-    @PreAuthorize("hasAnyRole('USER','ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','REVIEWER','USER')")
     public List<Product> getAllProducts(Authentication authentication) {
         storeAccessService.scopeOrNull(authentication); // users without a store see nothing
         return productService.getAllProducts();
     }
 
     @GetMapping("/products/{id}")
-    @PreAuthorize("hasAnyRole('USER','ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','REVIEWER','USER')")
     public Product getProductById(@PathVariable Long id, Authentication authentication) {
         storeAccessService.scopeOrNull(authentication);
         return productService.getProductById(id);

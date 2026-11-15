@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequiredArgsConstructor
@@ -40,6 +42,9 @@ public class RetailController {
         Long resolvedStoreId = storeAccessService.resolveStore(authentication, storeId);
         LocalDate start = from != null ? LocalDate.parse(from) : LocalDate.now().minusDays(7);
         LocalDate end = to != null ? LocalDate.parse(to) : LocalDate.now();
+        if (start.isAfter(end)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "from must not be after to");
+        }
         return ResponseEntity.ok(inventoryService.getFulfillmentIssues(resolvedStoreId, start, end));
     }
 

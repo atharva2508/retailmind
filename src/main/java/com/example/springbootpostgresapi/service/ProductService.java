@@ -6,6 +6,7 @@ import com.example.springbootpostgresapi.entity.Product;
 import com.example.springbootpostgresapi.repository.ProductRepository;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -78,7 +79,12 @@ public class ProductService {
     @Transactional
     public void deleteProduct(Long id, String actor) {
         Product product = getProductById(id);
-        productRepository.delete(product);
+        try {
+            productRepository.delete(product);
+            productRepository.flush();
+        } catch (DataIntegrityViolationException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Product has inventory or order history and cannot be deleted");
+        }
         auditEventService.log("DELETE", "PRODUCT", id, null, actor, "Deleted SKU " + product.getSku());
     }
 }

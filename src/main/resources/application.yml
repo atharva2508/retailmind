@@ -1,4 +1,7 @@
 spring:
+  config:
+    # Optional local .env file (KEY=VALUE). Real environment variables win over it.
+    import: optional:file:.env[.properties]
   application:
     name: springboot-postgres-api
   datasource:

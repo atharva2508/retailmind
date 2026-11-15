@@ -23,7 +23,7 @@ public class ChatController {
     private final StoreAccessService storeAccessService;
 
     @PostMapping("/chat")
-    @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','USER')")
+    @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','REVIEWER','USER')")
     public ResponseEntity<Map<String, Object>> chat(@Valid @RequestBody ChatRequest request,
                                                     Authentication authentication) {
         Long storeId = storeAccessService.resolveStore(authentication, request.storeId());

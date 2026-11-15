@@ -892,6 +892,38 @@ class ProductControllerIntegrationTest {
                 .andExpect(jsonPath("$.dataStatus", is("STALE")));
     }
 
+    @Test
+    void staleProductWriteCannotOverwriteANewerPrice() {
+        Product stale = productRepository.findBySku("SKU-3003").orElseThrow();
+        Product fresh = productRepository.findBySku("SKU-3003").orElseThrow();
+        BigDecimal original = fresh.getPrice();
+        fresh.setPrice(original.add(BigDecimal.ONE));
+        productRepository.save(fresh);
+        try {
+            // Same thing an admin edit does when it read the product before a proposal was applied.
+            stale.setDescription("edited from an old copy");
+            try {
+                productRepository.save(stale);
+            } catch (RuntimeException expected) {
+                // the stale write must be refused
+            }
+            if (productRepository.findBySku("SKU-3003").orElseThrow().getPrice().compareTo(original.add(BigDecimal.ONE)) != 0) {
+                throw new AssertionError("A write from an old copy put the old price back");
+            }
+        } finally {
+            Product restore = productRepository.findBySku("SKU-3003").orElseThrow();
+            restore.setPrice(original);
+            productRepository.save(restore);
+        }
+    }
+
+    @Test
+    void healthReportsTheDatabase() throws Exception {
+        mockMvc.perform(get("/api/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.database", is("UP")));
+    }
+
     private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {
         return mockMvc.perform(put("/api/products/" + product.getId()).header("Authorization", "Bearer " + adminToken)
                 .contentType(MediaType.APPLICATION_JSON)

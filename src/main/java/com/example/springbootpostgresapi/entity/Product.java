@@ -6,12 +6,14 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.ColumnDefault;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
@@ -49,6 +51,13 @@ public class Product {
     @Column(nullable = false)
     @Builder.Default
     private Integer defaultReorderThreshold = 0;
+
+    // Two writers that read the same row cannot both save: the second gets a 409.
+    // Primitive with a DB default so existing rows start at 0 when ddl-auto adds the column.
+    @Version
+    @Column(nullable = false)
+    @ColumnDefault("0")
+    private long version;
 
     @CreationTimestamp
     @Column(nullable = false, updatable = false)

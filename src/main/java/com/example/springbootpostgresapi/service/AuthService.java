@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.InternalAuthenticationServiceException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
@@ -87,6 +88,9 @@ public class AuthService {
         Authentication authentication;
         try {
             authentication = authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, request.password()));
+        } catch (InternalAuthenticationServiceException e) {
+            // The user lookup itself failed (database down). Not a wrong password: do not count or audit it.
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Service temporarily unavailable");
         } catch (AuthenticationException e) {
             boolean nowLocked = recordFailure(key, now);
             // Only real accounts are audited, and the lock is logged once, so guessing cannot flood the audit trail.

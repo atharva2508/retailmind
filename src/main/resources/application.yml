@@ -9,6 +9,9 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Fail in 5s, not the default 30s, when the database is unreachable.
+      connection-timeout: 5000
   jpa:
     hibernate:
       ddl-auto: update

@@ -9,6 +9,8 @@ spring:
       ddl-auto: create-drop
 
 app:
+  rate-limit:
+    max-requests: 100000
   jwt:
     secret: test-only-secret-key-0123456789-abcdefghijklmnop
     expiration-ms: 900000

@@ -13,12 +13,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
+import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -55,12 +54,6 @@ public class InventoryImportService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Snapshot type must be SOD or EOD");
         }
 
-        String fileName = request.fileName() == null ? "" : request.fileName().trim();
-        Matcher matcher = FILE_NAME_PATTERN.matcher(fileName);
-        if (!matcher.matches() || !matcher.group(1).equalsIgnoreCase(store.getStoreCode())) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Filename must match <STORE_CODE>_<yyyyMMdd>_<SOD|EOD>.csv and belong to the selected store");
-        }
-
         LocalDate asOf;
         try {
             asOf = LocalDate.parse(request.asOf());
@@ -71,77 +64,82 @@ public class InventoryImportService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "asOf cannot be in the future");
         }
 
+        // The file name must agree with the body: same store, same date, same snapshot type.
+        String fileName = request.fileName() == null ? "" : request.fileName().trim();
+        Matcher matcher = FILE_NAME_PATTERN.matcher(fileName);
+        if (!matcher.matches() || !matcher.group(1).equalsIgnoreCase(store.getStoreCode())
+                || !matcher.group(2).equals(asOf.format(DateTimeFormatter.BASIC_ISO_DATE))
+                || !matcher.group(3).equals(snapshotType)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Filename must match <STORE_CODE>_<yyyyMMdd>_<SOD|EOD>.csv and agree with store, asOf and snapshot type");
+        }
+
         List<InventoryImportRequest.InventoryRow> rows = request.rows() == null ? List.of() : request.rows();
         if (rows.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At least one inventory row is required");
         }
 
+        // Snapshot time comes from the file date, not from the clock at import time.
+        LocalDateTime snapshotTime = snapshotType.equals("SOD") ? asOf.atStartOfDay() : asOf.atTime(23, 59, 59);
+        Map<String, Product> productsBySku = productRepository.findAll().stream()
+                .collect(Collectors.toMap(product -> product.getSku().toUpperCase(), product -> product));
+
         Set<String> seenSkus = new HashSet<>();
         int unknownSkuCount = 0;
-        int missingSkuCount = 0;
         int audMismatchCount = 0;
-        StringBuilder errorSummary = new StringBuilder();
-
-        long activeProductCount = productRepository.count();
-        int minCoverage = Math.max(1, (int) Math.ceil(activeProductCount * 0.5));
-        if (rows.size() < minCoverage) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Import rejected: file coverage is below the minimum threshold (" + minCoverage + " rows required)");
-        }
+        StringBuilder content = new StringBuilder();
 
         for (InventoryImportRequest.InventoryRow row : rows) {
-            String sku = row.sku() == null ? "" : row.sku().trim();
+            String sku = row.sku() == null ? "" : row.sku().trim().toUpperCase();
             if (sku.isBlank()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "SKU is required for every row");
             }
-            if (!seenSkus.add(sku.toUpperCase())) {
+            if (!seenSkus.add(sku)) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Duplicate SKU in file: " + sku);
             }
+            content.append(sku).append(',').append(row.bal()).append(',').append(row.aud()).append(',')
+                    .append(row.rac()).append(',').append(row.held()).append('\n');
 
-            Optional<Product> productOpt = productRepository.findBySku(sku);
-            if (productOpt.isEmpty()) {
+            Product product = productsBySku.get(sku);
+            if (product == null) {
                 unknownSkuCount++;
                 continue;
             }
-
-            if (row.aud() != null && row.bal() + row.rac() != row.aud()) {
+            if (row.bal() + row.rac() != row.aud()) {
                 audMismatchCount++;
             }
-            Product product = productOpt.get();
-            StockSnapshot snapshot = stockSnapshotRepository.findByStoreIdAndProductId(store.getId(), product.getId()).stream()
-                    .filter(existing -> existing.getBusinessDate().equals(asOf) && existing.getSnapshotType().equals(snapshotType))
-                    .findFirst()
-                    .orElseGet(() -> StockSnapshot.builder()
-                            .store(store)
-                            .product(product)
-                            .businessDate(asOf)
-                            .snapshotType(snapshotType)
-                            .asOf(LocalDateTime.of(asOf, LocalDateTime.now().toLocalTime()))
-                            .bal(0)
-                            .aud(0)
-                            .rac(0)
-                            .held(0)
-                            .absent(false)
-                            .build());
-
-            snapshot.setBal(row.bal());
-            snapshot.setAud(row.aud());
-            snapshot.setRac(row.rac());
-            snapshot.setHeld(row.held());
-            snapshot.setAsOf(LocalDateTime.of(asOf, LocalDateTime.now().toLocalTime()));
-            snapshot.setAbsent(false);
-            stockSnapshotRepository.save(snapshot);
+            saveSnapshot(store, product, asOf, snapshotType, snapshotTime, row.bal(), row.aud(), row.rac(), row.held(), false);
         }
 
+        // Coverage counts only SKUs we know. Throwing here rolls back every snapshot written above.
+        int knownSkuCount = rows.size() - unknownSkuCount;
+        int minCoverage = Math.max(1, (int) Math.ceil(productsBySku.size() * 0.5));
+        if (knownSkuCount < minCoverage) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Import rejected: file covers " + knownSkuCount + " known SKUs, " + minCoverage + " required");
+        }
+
+        // A product that is not in the file has no stock in this store: record 0 and flag it.
+        int missingSkuCount = 0;
+        for (Map.Entry<String, Product> entry : productsBySku.entrySet()) {
+            if (!seenSkus.contains(entry.getKey())) {
+                missingSkuCount++;
+                saveSnapshot(store, entry.getValue(), asOf, snapshotType, snapshotTime, 0, 0, 0, 0, true);
+            }
+        }
+
+        StringBuilder errorSummary = new StringBuilder();
         if (unknownSkuCount > 0) {
-            missingSkuCount = unknownSkuCount;
             errorSummary.append("Unknown SKUs: ").append(unknownSkuCount).append("; ");
+        }
+        if (missingSkuCount > 0) {
+            errorSummary.append("Absent SKUs set to 0: ").append(missingSkuCount).append("; ");
         }
         if (audMismatchCount > 0) {
             errorSummary.append("AUD mismatch rows: ").append(audMismatchCount).append("; ");
         }
 
-        String checksum = sha256(fileName + "|" + store.getStoreCode() + "|" + snapshotType + "|" + asOf + "|" + rows.size());
+        String checksum = sha256(content.toString());
         InventoryImport inventoryImport = InventoryImport.builder()
                 .storeId(store.getId())
                 .storeCodeRaw(store.getStoreCode())
@@ -168,7 +166,23 @@ public class InventoryImportService {
         result.put("unknownSkuCount", saved.getUnknownSkuCount());
         result.put("missingSkuCount", saved.getMissingSkuCount());
         result.put("asOf", saved.getAsOf().toString());
+        result.put("checksum", saved.getChecksum());
         return result;
+    }
+
+    private void saveSnapshot(Store store, Product product, LocalDate asOf, String snapshotType, LocalDateTime snapshotTime,
+                              int bal, int aud, int rac, int held, boolean absent) {
+        StockSnapshot snapshot = stockSnapshotRepository.findByStoreIdAndProductId(store.getId(), product.getId()).stream()
+                .filter(existing -> existing.getBusinessDate().equals(asOf) && existing.getSnapshotType().equals(snapshotType))
+                .findFirst()
+                .orElseGet(() -> StockSnapshot.builder().store(store).product(product).businessDate(asOf).snapshotType(snapshotType).build());
+        snapshot.setBal(bal);
+        snapshot.setAud(aud);
+        snapshot.setRac(rac);
+        snapshot.setHeld(held);
+        snapshot.setAsOf(snapshotTime);
+        snapshot.setAbsent(absent);
+        stockSnapshotRepository.save(snapshot);
     }
 
     public List<Map<String, Object>> getRecentImports() {

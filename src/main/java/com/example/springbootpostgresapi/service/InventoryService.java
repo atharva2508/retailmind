@@ -34,14 +34,36 @@ public class InventoryService {
     private final OrderLineRepository orderLineRepository;
     private final ReturnLineRepository returnLineRepository;
 
+    private static final int STALE_AFTER_DAYS = 1;
+
     public Map<String, Object> getStoreReconciliation(Long storeId, LocalDate date) {
         Store store = requireStore(storeId);
         LocalDate businessDate = date != null ? date : LocalDate.now();
 
-        int sodBal = sumSnapshotValue(storeId, businessDate, "SOD", StockSnapshot::getBal);
-        int eodBal = sumSnapshotValue(storeId, businessDate, "EOD", StockSnapshot::getBal);
-        int sodRac = sumSnapshotValue(storeId, businessDate, "SOD", StockSnapshot::getRac);
-        int eodRac = sumSnapshotValue(storeId, businessDate, "EOD", StockSnapshot::getRac);
+        List<StockSnapshot> sod = stockSnapshotRepository.findByStoreIdAndBusinessDateAndSnapshotType(storeId, businessDate, "SOD");
+        List<StockSnapshot> eod = stockSnapshotRepository.findByStoreIdAndBusinessDateAndSnapshotType(storeId, businessDate, "EOD");
+        List<StockSnapshot> previousEod = stockSnapshotRepository.findByStoreIdAndBusinessDateAndSnapshotType(storeId, businessDate.minusDays(1), "EOD");
+
+        Map<String, Object> reconciliation = new LinkedHashMap<>();
+        reconciliation.put("storeId", store.getId());
+        reconciliation.put("storeCode", store.getStoreCode());
+        reconciliation.put("businessDate", businessDate.toString());
+
+        // Without both snapshots there is nothing to compare. Say so instead of reporting zeros as a clean day.
+        if (sod.isEmpty() || eod.isEmpty()) {
+            reconciliation.put("expectedEodBal", null);
+            reconciliation.put("balVariance", null);
+            reconciliation.put("racVariance", null);
+            reconciliation.put("overnightGap", null);
+            reconciliation.put("status", "NO_DATA");
+            reconciliation.put("asOf", null);
+            return reconciliation;
+        }
+
+        int sodBal = sod.stream().mapToInt(StockSnapshot::getBal).sum();
+        int eodBal = eod.stream().mapToInt(StockSnapshot::getBal).sum();
+        int sodRac = sod.stream().mapToInt(StockSnapshot::getRac).sum();
+        int eodRac = eod.stream().mapToInt(StockSnapshot::getRac).sum();
 
         int confirmedToday = sumConfirmedToday(storeId, businessDate);
         int customerCancelledToday = sumCustomerCancelledToday(storeId, businessDate);
@@ -51,19 +73,16 @@ public class InventoryService {
 
         int expectedEodBal = sodBal - confirmedToday + customerCancelledToday + goodReturnsMovedToday;
         int expectedEodRac = sodRac + returnsReceivedToday - goodReturnsMovedToday - badReturnsSentToday;
-        int overnightGap = sumSnapshotValue(storeId, businessDate, "SOD", StockSnapshot::getBal)
-                - sumSnapshotValue(storeId, businessDate.minusDays(1), "EOD", StockSnapshot::getBal);
+        int balVariance = eodBal - expectedEodBal;
+        int racVariance = eodRac - expectedEodRac;
 
-        Map<String, Object> reconciliation = new LinkedHashMap<>();
-        reconciliation.put("storeId", store.getId());
-        reconciliation.put("storeCode", store.getStoreCode());
-        reconciliation.put("businessDate", businessDate.toString());
         reconciliation.put("expectedEodBal", expectedEodBal);
-        reconciliation.put("balVariance", eodBal - expectedEodBal);
-        reconciliation.put("racVariance", eodRac - expectedEodRac);
-        reconciliation.put("overnightGap", overnightGap);
-        reconciliation.put("status", "OK");
-        reconciliation.put("asOf", businessDate.toString());
+        reconciliation.put("balVariance", balVariance);
+        reconciliation.put("racVariance", racVariance);
+        reconciliation.put("overnightGap", previousEod.isEmpty() ? null
+                : sodBal - previousEod.stream().mapToInt(StockSnapshot::getBal).sum());
+        reconciliation.put("status", balVariance == 0 && racVariance == 0 ? "OK" : "VARIANCE");
+        reconciliation.put("asOf", eod.stream().map(StockSnapshot::getAsOf).max(Comparator.naturalOrder()).map(LocalDateTime::toString).orElse(null));
         return reconciliation;
     }
 
@@ -93,6 +112,7 @@ public class InventoryService {
         List<ReturnLine> staleGoodReturns = returnLineRepository.findByStoreId(storeId).stream()
                 .filter(line -> "03".equals(line.getReturnCode()))
                 .filter(line -> line.getMovedToBalAt() == null)
+                .filter(line -> line.getReceivedAt() != null)
                 .filter(line -> line.getReceivedAt().toLocalDate().isBefore(LocalDate.now().minusDays(2)))
                 .toList();
 
@@ -132,6 +152,9 @@ public class InventoryService {
                 item.put("available", available);
                 item.put("storeId", storeId);
                 item.put("status", available <= 0 ? "OUT_OF_STOCK" : "AT_RISK");
+                item.put("absent", snapshot.getAbsent());
+                item.put("asOf", snapshot.getAsOf().toString());
+                item.put("dataStatus", dataStatus(snapshot));
                 lowStock.add(item);
             }
         }
@@ -143,7 +166,7 @@ public class InventoryService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found: " + productId));
 
         StockSnapshot snapshot = latestSnapshot(storeId, productId);
-        int available = snapshot != null ? Math.max(snapshot.getBal() - snapshot.getHeld(), 0) : 0;
+        Integer available = snapshot != null ? Math.max(snapshot.getBal() - snapshot.getHeld(), 0) : null;
         int hold = orderLineRepository.findByStoreId(storeId).stream()
                 .filter(line -> productId.equals(line.getProduct().getId()))
                 .filter(line -> "CONFIRMED".equals(line.getStatus()) || "PARTIALLY_CONFIRMED".equals(line.getStatus()))
@@ -165,12 +188,14 @@ public class InventoryService {
         details.put("sku", product.getSku());
         details.put("name", product.getName());
         details.put("available", available);
-        details.put("inCheckout", snapshot != null ? snapshot.getHeld() : 0);
+        details.put("inCheckout", snapshot != null ? snapshot.getHeld() : null);
         details.put("hold", hold);
         details.put("goodReturn", goodReturn);
         details.put("unavailable", unavailable);
         details.put("storeId", storeId);
-        details.put("asOf", snapshot != null ? snapshot.getAsOf().toString() : LocalDateTime.now().toString());
+        details.put("absent", snapshot != null && snapshot.getAbsent());
+        details.put("asOf", snapshot != null ? snapshot.getAsOf().toString() : null);
+        details.put("dataStatus", dataStatus(snapshot));
         return details;
     }
 
@@ -179,10 +204,12 @@ public class InventoryService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Store not found: " + storeId));
     }
 
-    private int sumSnapshotValue(Long storeId, LocalDate businessDate, String snapshotType, java.util.function.ToIntFunction<StockSnapshot> mapper) {
-        return stockSnapshotRepository.findByStoreIdAndBusinessDateAndSnapshotType(storeId, businessDate, snapshotType).stream()
-                .mapToInt(mapper)
-                .sum();
+    /** NO_DATA: no snapshot. STALE: newest snapshot is older than yesterday. FRESH otherwise. */
+    public static String dataStatus(StockSnapshot snapshot) {
+        if (snapshot == null) {
+            return "NO_DATA";
+        }
+        return snapshot.getBusinessDate().isBefore(LocalDate.now().minusDays(STALE_AFTER_DAYS)) ? "STALE" : "FRESH";
     }
 
     private int sumConfirmedToday(Long storeId, LocalDate businessDate) {
@@ -198,6 +225,7 @@ public class InventoryService {
                 .filter(line -> line.getCancelledAt() != null)
                 .filter(line -> line.getCancelledAt().toLocalDate().equals(businessDate))
                 .filter(line -> "CUSTOMER".equals(line.getCancelReason()))
+                .filter(line -> line.getConfirmedAt() != null && !line.getCancelledAt().isBefore(line.getConfirmedAt()))
                 .mapToInt(line -> Math.max(line.getQtyCancelled(), 0))
                 .sum();
     }

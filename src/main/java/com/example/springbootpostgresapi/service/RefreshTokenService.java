@@ -3,11 +3,16 @@ package com.example.springbootpostgresapi.service;
 import com.example.springbootpostgresapi.entity.RefreshToken;
 import com.example.springbootpostgresapi.entity.User;
 import com.example.springbootpostgresapi.repository.RefreshTokenRepository;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.Instant;
-import java.util.Optional;
-import java.util.UUID;
+import java.util.Base64;
+import java.util.HexFormat;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -16,46 +21,64 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class RefreshTokenService {
 
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     private final RefreshTokenRepository refreshTokenRepository;
 
+    /** Issues a new token for the user. Returns the raw token; only its hash is stored. */
     @Transactional
-    public RefreshToken createRefreshToken(User user, long expirationMs) {
-        String token = UUID.randomUUID().toString();
-        RefreshToken refreshToken = RefreshToken.builder()
-                .token(token)
+    public String create(User user, Instant expiry) {
+        byte[] bytes = new byte[32];
+        RANDOM.nextBytes(bytes);
+        String raw = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        refreshTokenRepository.save(RefreshToken.builder()
+                .tokenHash(hash(raw))
                 .user(user)
-                .expiryDate(Instant.now().plusMillis(expirationMs))
+                .expiryDate(expiry)
                 .revoked(false)
-                .build();
-
-        return refreshTokenRepository.save(refreshToken);
+                .build());
+        return raw;
     }
 
-    @Transactional
-    public RefreshToken rotateRefreshToken(RefreshToken currentToken, User user, long expirationMs) {
-        currentToken.setRevoked(true);
-        refreshTokenRepository.save(currentToken);
-        return createRefreshToken(user, expirationMs);
-    }
-
-    public Optional<RefreshToken> findByToken(String token) {
-        return refreshTokenRepository.findByToken(token);
-    }
-
-    @Transactional
-    public RefreshToken verifyExpiration(RefreshToken refreshToken) {
-        if (refreshToken.getExpiryDate().isBefore(Instant.now())) {
-            refreshTokenRepository.delete(refreshToken);
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Refresh token expired");
+    /**
+     * Revokes the presented token and issues a new one with the SAME expiry, so a session never outlives
+     * its first login. A token that is already revoked means it was stolen or replayed: revoke every token
+     * of that user. Must not roll back on the 401, or the family revoke would be undone.
+     */
+    @Transactional(noRollbackFor = ResponseStatusException.class)
+    public RotatedToken rotate(String raw) {
+        RefreshToken current = refreshTokenRepository.findByTokenHash(hash(raw))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid refresh token"));
+        if (current.getExpiryDate().isBefore(Instant.now())) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid refresh token");
         }
-        if (refreshToken.isRevoked()) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Refresh token has been revoked");
+        if (refreshTokenRepository.revokeIfActive(current.getId()) == 0) {
+            refreshTokenRepository.revokeAllForUser(current.getUser());
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid refresh token");
         }
-        return refreshToken;
+        return new RotatedToken(current.getUser(), create(current.getUser(), current.getExpiryDate()));
     }
 
     @Transactional
-    public void revokeAllForUser(User user) {
-        refreshTokenRepository.deleteByUser(user);
+    public void revoke(String raw) {
+        refreshTokenRepository.findByTokenHash(hash(raw))
+                .ifPresent(token -> refreshTokenRepository.revokeIfActive(token.getId()));
     }
+
+    // Revoked tokens are kept until expiry so reuse can still be detected.
+    @Scheduled(fixedRate = 3_600_000)
+    @Transactional
+    public void deleteExpired() {
+        refreshTokenRepository.deleteExpired(Instant.now());
+    }
+
+    private static String hash(String raw) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(raw.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    public record RotatedToken(User user, String rawToken) {}
 }

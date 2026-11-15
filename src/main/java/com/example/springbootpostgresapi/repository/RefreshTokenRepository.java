@@ -2,17 +2,29 @@ package com.example.springbootpostgresapi.repository;
 
 import com.example.springbootpostgresapi.entity.RefreshToken;
 import com.example.springbootpostgresapi.entity.User;
-import java.util.List;
+import java.time.Instant;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 @Repository
 public interface RefreshTokenRepository extends JpaRepository<RefreshToken, Long> {
 
-    Optional<RefreshToken> findByToken(String token);
+    Optional<RefreshToken> findByTokenHash(String tokenHash);
 
-    List<RefreshToken> findAllByUser(User user);
+    // Atomic: only one caller can revoke an active token, so concurrent rotation of the same token cannot both win.
+    @Modifying
+    @Query("update RefreshToken t set t.revoked = true where t.id = :id and t.revoked = false")
+    int revokeIfActive(@Param("id") Long id);
 
-    void deleteByUser(User user);
+    @Modifying
+    @Query("update RefreshToken t set t.revoked = true where t.user = :user")
+    int revokeAllForUser(@Param("user") User user);
+
+    @Modifying
+    @Query("delete from RefreshToken t where t.expiryDate < :now")
+    int deleteExpired(@Param("now") Instant now);
 }

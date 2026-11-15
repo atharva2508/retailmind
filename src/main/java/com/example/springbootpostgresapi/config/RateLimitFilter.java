@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -15,8 +16,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Component
 public class RateLimitFilter extends OncePerRequestFilter {
 
-    private static final int MAX_REQUESTS = 120;
+    @Value("${app.rate-limit.max-requests:120}")
+    private int maxRequests;
     private static final long WINDOW_MS = 10_000;
+    private static final int MAX_BUCKETS = 10_000;
     private final Map<String, Bucket> buckets = new ConcurrentHashMap<>();
 
     @Override
@@ -30,6 +33,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String key = request.getRemoteAddr();
         long now = System.currentTimeMillis();
+        if (buckets.size() > MAX_BUCKETS) {
+            buckets.values().removeIf(b -> now - b.windowStartMs > WINDOW_MS);
+        }
         Bucket bucket = buckets.computeIfAbsent(key, ignored -> new Bucket(now));
 
         synchronized (bucket) {
@@ -37,7 +43,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
                 bucket.windowStartMs = now;
                 bucket.count = 0;
             }
-            if (bucket.count >= MAX_REQUESTS) {
+            if (bucket.count >= maxRequests) {
                 response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
                 response.setContentType("application/json");
                 response.getWriter().write("{\"error\":\"Rate limit exceeded\"}");
@@ -50,7 +56,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
     }
 
     private static final class Bucket {
-        private long windowStartMs;
+        private volatile long windowStartMs;
         private int count;
 
         private Bucket(long windowStartMs) {

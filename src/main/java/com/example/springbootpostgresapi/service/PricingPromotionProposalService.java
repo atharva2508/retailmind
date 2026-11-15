@@ -50,11 +50,9 @@ public class PricingPromotionProposalService {
                 .limit(5)
                 .map(item -> {
                     String sku = String.valueOf(item.get("sku"));
-                    Product product = productRepository.findBySku(sku)
-                            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found: " + sku));
                     return PricingPromotionProposal.builder()
                             .proposalType("DISCOUNT")
-                            .targetSku(product.getSku())
+                            .targetSku(sku)
                             .status("SUGGESTED")
                             .version(1)
                             .creatorType("SYSTEM")

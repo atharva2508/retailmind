@@ -2,19 +2,25 @@ package com.example.springbootpostgresapi;
 
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.springbootpostgresapi.entity.OrderLine;
 import com.example.springbootpostgresapi.entity.PricingPromotionProposal;
+import com.example.springbootpostgresapi.repository.OrderLineRepository;
+import com.example.springbootpostgresapi.repository.StoreRepository;
 import com.example.springbootpostgresapi.repository.PricingPromotionProposalRepository;
 import com.example.springbootpostgresapi.repository.ProductRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Date;
 import javax.crypto.SecretKey;
@@ -23,8 +29,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -41,6 +49,15 @@ class ProductControllerIntegrationTest {
 
     @Autowired
     private ProductRepository productRepository;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private OrderLineRepository orderLineRepository;
+
+    @Autowired
+    private StoreRepository storeRepository;
 
     @Test
     void shouldServeHealthAndAllowAdminLogin() throws Exception {
@@ -76,7 +93,7 @@ class ProductControllerIntegrationTest {
         mockMvc.perform(get("/api/stores/1/reconciliation").param("date", "2026-11-05")
                         .header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status", is("OK")));
+                .andExpect(jsonPath("$.status", is("VARIANCE")));
     }
 
     @Test
@@ -111,7 +128,7 @@ class ProductControllerIntegrationTest {
 
         String token = objectMapper.readTree(result.getResponse().getContentAsString()).get("accessToken").asText();
 
-        String requestBody = "{\"storeId\":1,\"snapshotType\":\"SOD\",\"asOf\":\"2026-11-06\",\"fileName\":\"MAIN_20261106_SOD.csv\",\"rows\":[{\"sku\":\"SKU-1001\",\"bal\":20,\"aud\":21,\"rac\":1,\"held\":3},{\"sku\":\"SKU-2002\",\"bal\":8,\"aud\":8,\"rac\":0,\"held\":1}]}";
+        String requestBody = "{\"storeId\":2,\"snapshotType\":\"SOD\",\"asOf\":\"2026-11-06\",\"fileName\":\"NORTH_20261106_SOD.csv\",\"rows\":[{\"sku\":\"SKU-1001\",\"bal\":20,\"aud\":21,\"rac\":1,\"held\":3},{\"sku\":\"SKU-2002\",\"bal\":8,\"aud\":8,\"rac\":0,\"held\":1}]}";
 
         mockMvc.perform(post("/api/admin/inventory-imports/synthetic")
                         .header("Authorization", "Bearer " + token)
@@ -446,6 +463,175 @@ class ProductControllerIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-2002\",\"proposedValues\":\"{\\\"discountPercent\\\":5}\",\"rationale\":\"" + "x".repeat(4001) + "\"}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void loginLocksAfterFiveFailuresForAnyUsername() throws Exception {
+        String name = "lock_" + System.nanoTime();
+        register(name);
+        for (String username : new String[] {name, "ghost_" + System.nanoTime()}) {
+            for (int i = 0; i < 5; i++) {
+                login(username, "wrong-password").andExpect(status().isUnauthorized());
+            }
+            login(username, "secret123").andExpect(status().isTooManyRequests());
+        }
+    }
+
+    @Test
+    void usernamesAreCaseInsensitive() throws Exception {
+        login("ADMIN", "admin123").andExpect(status().isOk());
+        String name = "mixed_" + System.nanoTime();
+        register(name);
+        mockMvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"" + name.toUpperCase() + "\",\"email\":\"other_" + name + "@x.test\",\"password\":\"secret123\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void refreshTokenIsStoredHashed() throws Exception {
+        String raw = register("hash_" + System.nanoTime()).get("refreshToken").asText();
+        Integer plain = jdbcTemplate.queryForObject("select count(*) from refresh_tokens where token = ?", Integer.class, raw);
+        if (plain != 0) {
+            throw new AssertionError("Refresh token stored in plain text");
+        }
+    }
+
+    @Test
+    void reusedRefreshTokenRevokesAllTokensOfUser() throws Exception {
+        String r1 = register("reuse_" + System.nanoTime()).get("refreshToken").asText();
+        String r2 = objectMapper.readTree(refresh(r1).andExpect(status().isOk()).andReturn().getResponse().getContentAsString())
+                .get("refreshToken").asText();
+        refresh(r1).andExpect(status().isUnauthorized());
+        refresh(r2).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void rotationDoesNotExtendSessionLifetime() throws Exception {
+        String name = "life_" + System.nanoTime();
+        String r1 = register(name).get("refreshToken").asText();
+        refresh(r1).andExpect(status().isOk());
+        Integer expiries = jdbcTemplate.queryForObject(
+                "select count(distinct t.expiry_date) from refresh_tokens t join app_users u on t.user_id = u.id where u.username = ?",
+                Integer.class, name);
+        if (expiries != 1) {
+            throw new AssertionError("Rotation extended the refresh token lifetime");
+        }
+    }
+
+    @Test
+    void logoutRevokesRefreshToken() throws Exception {
+        String r = register("logout_" + System.nanoTime()).get("refreshToken").asText();
+        mockMvc.perform(post("/api/auth/logout").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"refreshToken\":\"" + r + "\"}"))
+                .andExpect(status().isNoContent());
+        refresh(r).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void importFlagsAbsentSkusAndReturnsContentChecksum() throws Exception {
+        LocalDate day = LocalDate.now().minusDays(1);
+        String first = importSnapshot(day, "SOD", row("SKU-2002", 9, 1) + "," + row("SKU-3003", 4, 0))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.missingSkuCount", is(1)))
+                .andReturn().getResponse().getContentAsString();
+        String second = importSnapshot(day, "SOD", row("SKU-2002", 8, 1) + "," + row("SKU-3003", 4, 0))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        if (objectMapper.readTree(first).path("checksum").asText().equals(objectMapper.readTree(second).path("checksum").asText())) {
+            throw new AssertionError("Checksum does not depend on file content");
+        }
+        // SKU-1001 (product 1) was not in the file: zero stock, flagged absent, timestamp from the file date.
+        mockMvc.perform(get("/api/products/1/details").param("storeId", "2")
+                        .header("Authorization", "Bearer " + tokenFor("admin", "admin123")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.absent", is(true)))
+                .andExpect(jsonPath("$.available", is(0)))
+                .andExpect(jsonPath("$.dataStatus", is("FRESH")))
+                .andExpect(jsonPath("$.asOf", is(day + "T00:00")));
+    }
+
+    @Test
+    void importRejectsBadRowsNamesAndCoverage() throws Exception {
+        LocalDate day = LocalDate.now().minusDays(8);
+        importSnapshot(day, "SOD", row("SKU-2002", 9, 1) + "," + row("SKU-3003", -5, 0))
+                .andExpect(status().isBadRequest());
+        importSnapshot(day, "SOD", row("NOPE-1", 1, 0) + "," + row("NOPE-2", 1, 0))
+                .andExpect(status().isBadRequest());
+        // File name says EOD, body says SOD.
+        mockMvc.perform(post("/api/admin/inventory-imports/synthetic").header("Authorization", "Bearer " + tokenFor("admin", "admin123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"storeId\":2,\"snapshotType\":\"SOD\",\"asOf\":\"" + day + "\",\"fileName\":\"NORTH_"
+                                + day.toString().replace("-", "") + "_EOD.csv\",\"rows\":[" + row("SKU-2002", 9, 1) + "," + row("SKU-3003", 4, 0) + "]}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void missingAndOldDataIsNotShownAsFresh() throws Exception {
+        String admin = tokenFor("admin", "admin123");
+        // Store 3 has no snapshots at all.
+        mockMvc.perform(get("/api/products/1/details").param("storeId", "3").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dataStatus", is("NO_DATA")))
+                .andExpect(jsonPath("$.asOf", nullValue()))
+                .andExpect(jsonPath("$.available", nullValue()));
+        mockMvc.perform(get("/api/stores/3/reconciliation").param("date", "2026-11-05").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("NO_DATA")));
+        // Store 1 only has the seeded snapshots from 2026-11-05.
+        mockMvc.perform(get("/api/products/1/details").param("storeId", "1").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dataStatus", is("STALE")));
+        mockMvc.perform(get("/api/products/low-stock").param("storeId", "1").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].dataStatus", is("STALE")));
+    }
+
+    @Test
+    void cancelBeforeConfirmationIsNotAddedBack() throws Exception {
+        LocalDate day = LocalDate.now().minusDays(4);
+        String rows = row("SKU-1001", 10, 0) + "," + row("SKU-2002", 10, 0) + "," + row("SKU-3003", 10, 0);
+        importSnapshot(day, "SOD", rows).andExpect(status().isOk());
+        importSnapshot(day, "EOD", rows).andExpect(status().isOk());
+        orderLineRepository.save(OrderLine.builder().orderId("ORD-T-" + System.nanoTime()).lineNo(1)
+                .store(storeRepository.findByStoreCode("NORTH").orElseThrow())
+                .product(productRepository.findBySku("SKU-1001").orElseThrow())
+                .qtyOrdered(2).qtyConfirmed(0).qtyCancelled(2).qtyShipped(0).status("CANCELLED").cancelReason("CUSTOMER")
+                .createdAt(day.atTime(9, 0)).cancelledAt(day.atTime(10, 0)).build());
+
+        mockMvc.perform(get("/api/stores/2/reconciliation").param("date", day.toString())
+                        .header("Authorization", "Bearer " + tokenFor("admin", "admin123")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.expectedEodBal", is(30)))
+                .andExpect(jsonPath("$.status", is("OK")));
+    }
+
+    private String row(String sku, int bal, int held) {
+        return "{\"sku\":\"" + sku + "\",\"bal\":" + bal + ",\"aud\":" + bal + ",\"rac\":0,\"held\":" + held + "}";
+    }
+
+    private ResultActions importSnapshot(LocalDate day, String type, String rows) throws Exception {
+        return mockMvc.perform(post("/api/admin/inventory-imports/synthetic").header("Authorization", "Bearer " + tokenFor("admin", "admin123"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"storeId\":2,\"snapshotType\":\"" + type + "\",\"asOf\":\"" + day + "\",\"fileName\":\"NORTH_"
+                        + day.toString().replace("-", "") + "_" + type + ".csv\",\"rows\":[" + rows + "]}"));
+    }
+
+    private JsonNode register(String username) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"" + username + "\",\"email\":\"" + username + "@x.test\",\"password\":\"secret123\"}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return objectMapper.readTree(result.getResponse().getContentAsString());
+    }
+
+    private ResultActions login(String username, String password) throws Exception {
+        return mockMvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(new LoginRequest(username, password))));
+    }
+
+    private ResultActions refresh(String refreshToken) throws Exception {
+        return mockMvc.perform(post("/api/auth/refresh").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"refreshToken\":\"" + refreshToken + "\"}"));
     }
 
     private long createProposal(String token, String escapedValues) throws Exception {

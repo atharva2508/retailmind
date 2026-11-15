@@ -10,23 +10,36 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class RetailMindChatService {
 
     private final RetailMindToolService toolService;
+    private final ClaudeChatService claudeChatService;
 
     public Map<String, Object> answer(String message, Long storeId, String conversationId) {
         if (message == null || message.isBlank()) {
             throw new IllegalArgumentException("Message is required");
         }
 
+        // With an API key, Claude answers. Without one, or if the call fails, keyword routing below answers.
+        if (claudeChatService.isEnabled()) {
+            try {
+                return claudeChatService.answer(message, storeId, conversationId);
+            } catch (RuntimeException e) {
+                log.warn("Claude call failed, answering with keyword routing: {}", e.toString());
+            }
+        }
+
         String normalized = message.toLowerCase();
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("requestId", UUID.randomUUID().toString());
         response.put("conversationId", conversationId != null ? conversationId : "default");
+        response.put("engine", "keyword");
 
         List<Map<String, Object>> toolCalls = new ArrayList<>();
         List<Map<String, Object>> resultPayload = new ArrayList<>();

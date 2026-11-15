@@ -30,6 +30,10 @@ server:
   port: 8080
 
 app:
+  claude:
+    # Empty means chat uses keyword routing. Set ANTHROPIC_API_KEY to let Claude answer.
+    api-key: ${ANTHROPIC_API_KEY:}
+    model: claude-opus-5-5
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
   jwt:

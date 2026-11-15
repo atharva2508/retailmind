@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
@@ -19,6 +20,8 @@ public class RetailMindToolService {
     private final PricingPromotionProposalService pricingPromotionProposalService;
     private final RetailDashboardService retailDashboardService;
 
+    // Read-only transaction: tools must work outside a web request too, where no session is kept open.
+    @Transactional(readOnly = true)
     public List<Map<String, Object>> executeTool(String toolName, Map<String, String> args) {
         return switch (toolName) {
             case "getProductDetails" -> List.of(getProductDetails(args));

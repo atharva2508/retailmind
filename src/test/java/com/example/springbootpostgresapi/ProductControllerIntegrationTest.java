@@ -13,6 +13,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.springbootpostgresapi.ai.orchestration.ClaudeChatService;
 import com.example.springbootpostgresapi.config.ApiExceptionHandler;
 import com.example.springbootpostgresapi.entity.AuditEvent;
 import com.example.springbootpostgresapi.entity.OrderLine;
@@ -71,6 +72,9 @@ class ProductControllerIntegrationTest {
 
     @Autowired
     private AuditEventRepository auditEventRepository;
+
+    @Autowired
+    private ClaudeChatService claudeChatService;
 
     @Test
     void shouldServeHealthAndAllowAdminLogin() throws Exception {
@@ -948,6 +952,34 @@ class ProductControllerIntegrationTest {
                 "select count(*) from refresh_tokens t join app_users u on t.user_id = u.id where u.username = ?", Integer.class, name);
         if (rows > 10) {
             throw new AssertionError("Refresh token rows for one user: " + rows + " (want at most 10)");
+        }
+    }
+
+    @Test
+    void chatUsesKeywordRoutingWhenNoClaudeKeyIsSet() throws Exception {
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + tokenFor("admin", "admin123"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"low stock\",\"storeId\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.engine", is("keyword")));
+    }
+
+    @Test
+    void claudeToolsAreReadOnlyAndCannotLeaveTheCallersStore() {
+        // Only read tools exist. Nothing that creates, reviews or applies.
+        if (!claudeChatService.toolNames().equals(java.util.List.of("getLowStockProducts", "getDashboardSummary", "getDiscountSuggestions",
+                "getDailyReconciliation", "getFulfillmentIssues", "getProductDetails"))) {
+            throw new AssertionError("Unexpected tool list: " + claudeChatService.toolNames());
+        }
+        // The model asks for store 2; the server-side store (1) wins.
+        ClaudeChatService.ToolOutcome lowStock = claudeChatService.runTool("getLowStockProducts", java.util.Map.of("storeId", "2"), 1L);
+        if (lowStock.error() || !"1".equals(lowStock.args().get("storeId")) || !lowStock.json().contains("\"storeId\":1")) {
+            throw new AssertionError("Store was not forced: " + lowStock.args() + " " + lowStock.json());
+        }
+        // Unknown tool and bad arguments come back as error results, not exceptions.
+        if (!claudeChatService.runTool("applyProposal", java.util.Map.of("id", "1"), 1L).error()
+                || !claudeChatService.runTool("getDailyReconciliation", java.util.Map.of("date", "not-a-date"), 1L).error()
+                || !claudeChatService.runTool("getProductDetails", java.util.Map.of("productId", "999999"), 1L).error()) {
+            throw new AssertionError("A bad tool call did not return an error result");
         }
     }
 

@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: springboot-postgres-api
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/products_db}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+
+server:
+  port: 8080
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+    expiration-ms: 900000
+    refresh-expiration-ms: 604800000
+  seed:
+    enabled: ${SEED_ENABLED:false}
+    admin-password: ${SEED_ADMIN_PASSWORD:}
+    manager-password: ${SEED_MANAGER_PASSWORD:}
+    reviewer-password: ${SEED_REVIEWER_PASSWORD:}
+    user-password: ${SEED_USER_PASSWORD:}

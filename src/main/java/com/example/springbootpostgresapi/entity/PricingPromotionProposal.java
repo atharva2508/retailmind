@@ -1,0 +1,66 @@
+package com.example.springbootpostgresapi.entity;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import java.time.LocalDateTime;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import org.hibernate.annotations.CreationTimestamp;
+
+@Entity
+@Table(name = "pricing_promotion_proposals")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class PricingPromotionProposal {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private Long storeId;
+
+    @Column(nullable = false)
+    private String proposalType;
+
+    @Column(nullable = false)
+    private String targetSku;
+
+    @Column(nullable = false)
+    private String status;
+
+    @Column(nullable = false)
+    @Builder.Default
+    private Integer version = 1;
+
+    @Column(nullable = false)
+    private String creatorType;
+
+    @Column(length = 4000)
+    private String rationale;
+
+    @Column(length = 4000)
+    private String proposedValues;
+
+    @Column(length = 4000)
+    private String sourceRefs;
+
+    private String reviewerUsername;
+
+    @Column(length = 2000)
+    private String reviewComment;
+
+    @CreationTimestamp
+    @Column(nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+
+    private LocalDateTime decidedAt;
+    private LocalDateTime appliedAt;
+}

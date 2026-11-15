@@ -1,5 +1,6 @@
 package com.example.springbootpostgresapi.config;
 
+import java.sql.SQLException;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,6 +36,14 @@ public class ApiExceptionHandler {
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<Map<String, String>> badData(DataIntegrityViolationException e) {
         log.warn("Rejected write: {}", e.getMostSpecificCause().getMessage());
+        // SQLState 23505 = unique, 23503/23506 = foreign key. Same codes on Postgres and H2.
+        String state = e.getMostSpecificCause() instanceof SQLException sql ? sql.getSQLState() : null;
+        if ("23505".equals(state)) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "Already exists, or someone else created it at the same time"));
+        }
+        if ("23503".equals(state) || "23506".equals(state)) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "Refers to, or is still used by, other data"));
+        }
         return badRequest("Value too long or not allowed");
     }
 

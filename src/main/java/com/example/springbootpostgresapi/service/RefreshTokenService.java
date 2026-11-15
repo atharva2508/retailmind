@@ -10,6 +10,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -22,6 +23,7 @@ import org.springframework.web.server.ResponseStatusException;
 public class RefreshTokenService {
 
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int MAX_TOKENS_PER_USER = 10;
 
     private final RefreshTokenRepository refreshTokenRepository;
 
@@ -37,6 +39,12 @@ public class RefreshTokenService {
                 .expiryDate(expiry)
                 .revoked(false)
                 .build());
+        // Keep only the newest rows per user so repeated logins cannot grow the table without bound.
+        // A token older than that is simply unknown: it gets 401 but no longer triggers the family revoke.
+        List<Long> ids = refreshTokenRepository.findIdsByUserNewestFirst(user);
+        if (ids.size() > MAX_TOKENS_PER_USER) {
+            refreshTokenRepository.deleteAllByIdInBatch(ids.subList(MAX_TOKENS_PER_USER, ids.size()));
+        }
         return raw;
     }
 

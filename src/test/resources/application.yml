@@ -16,6 +16,8 @@ app:
     allowed-origins: http://localhost:3000
   rate-limit:
     max-requests: 100000
+  register:
+    max-per-hour: 100000
   jwt:
     secret: test-only-secret-key-0123456789-abcdefghijklmnop
     expiration-ms: 900000

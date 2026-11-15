@@ -13,6 +13,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.InternalAuthenticationServiceException;
@@ -46,13 +47,21 @@ public class AuthService {
     // Behind a reverse proxy getRemoteAddr() is the proxy: configure server.forward-headers-strategy.
     private final Map<String, Attempts> failedLogins = new ConcurrentHashMap<>();
 
+    // Client address -> {window start, attempts}. Same in-memory caveat as the lockout map.
+    private final Map<String, long[]> registrations = new ConcurrentHashMap<>();
+    private static final long HOUR_MS = 3_600_000;
+
+    @Value("${app.register.max-per-hour:5}")
+    private int maxRegistrationsPerHour;
+
     /** Usernames and emails are compared case-insensitively by storing and looking them up in lower case. */
     public static String normalize(String value) {
         return value == null ? null : value.trim().toLowerCase(Locale.ROOT);
     }
 
     @Transactional
-    public AuthResponse register(RegisterRequest request) {
+    public AuthResponse register(RegisterRequest request, String clientAddress) {
+        checkRegistrationLimit(clientAddress);
         String username = normalize(request.username());
         String email = normalize(request.email());
         // bcrypt only reads the first 72 bytes; anything longer would be silently cut.
@@ -125,6 +134,19 @@ public class AuthService {
 
     public void logout(TokenRefreshRequest request) {
         refreshTokenService.revoke(request.refreshToken());
+    }
+
+    // Counts attempts, successful or not, per client address and hour.
+    private void checkRegistrationLimit(String clientAddress) {
+        long now = System.currentTimeMillis();
+        if (registrations.size() >= MAX_TRACKED_USERNAMES) {
+            registrations.values().removeIf(window -> now - window[0] > HOUR_MS);
+        }
+        long[] window = registrations.compute(clientAddress, (k, old) ->
+                old == null || now - old[0] > HOUR_MS ? new long[] {now, 1} : new long[] {old[0], old[1] + 1});
+        if (window[1] > maxRegistrationsPerHour) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many registrations from this address, try again later");
+        }
     }
 
     /** Returns true when this failure is the one that starts the lock. */

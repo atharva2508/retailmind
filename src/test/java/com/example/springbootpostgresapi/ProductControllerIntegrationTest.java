@@ -13,6 +13,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.springbootpostgresapi.config.ApiExceptionHandler;
 import com.example.springbootpostgresapi.entity.AuditEvent;
 import com.example.springbootpostgresapi.entity.OrderLine;
 import com.example.springbootpostgresapi.entity.Product;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -922,6 +924,31 @@ class ProductControllerIntegrationTest {
         mockMvc.perform(get("/api/health"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.database", is("UP")));
+    }
+
+    @Test
+    void uniqueAndForeignKeyViolationsAreConflictsWithAnHonestMessage() {
+        ApiExceptionHandler handler = new ApiExceptionHandler();
+        var duplicate = handler.badData(new DataIntegrityViolationException("x", new java.sql.SQLException("duplicate key", "23505")));
+        var referenced = handler.badData(new DataIntegrityViolationException("x", new java.sql.SQLException("still referenced", "23503")));
+        var tooLong = handler.badData(new DataIntegrityViolationException("x", new java.sql.SQLException("too long", "22001")));
+        if (duplicate.getStatusCode().value() != 409 || referenced.getStatusCode().value() != 409 || tooLong.getStatusCode().value() != 400) {
+            throw new AssertionError("Statuses: duplicate " + duplicate.getStatusCode() + ", referenced " + referenced.getStatusCode() + ", too long " + tooLong.getStatusCode());
+        }
+    }
+
+    @Test
+    void refreshTokenRowsPerUserAreCapped() throws Exception {
+        String name = "cap_" + System.nanoTime();
+        register(name);
+        for (int i = 0; i < 15; i++) {
+            login(name, "secret123").andExpect(status().isOk());
+        }
+        Integer rows = jdbcTemplate.queryForObject(
+                "select count(*) from refresh_tokens t join app_users u on t.user_id = u.id where u.username = ?", Integer.class, name);
+        if (rows > 10) {
+            throw new AssertionError("Refresh token rows for one user: " + rows + " (want at most 10)");
+        }
     }
 
     private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {

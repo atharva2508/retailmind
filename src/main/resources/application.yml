@@ -12,7 +12,14 @@ spring:
     hikari:
       # Fail in 5s, not the default 30s, when the database is unreachable.
       connection-timeout: 5000
+  sql:
+    init:
+      # Adds database-side constraints after Hibernate has made the tables. See db/postgres-constraints.sql.
+      mode: always
+      schema-locations: classpath:db/postgres-constraints.sql
+      separator: ";;"
   jpa:
+    defer-datasource-initialization: true
     hibernate:
       ddl-auto: update
     show-sql: false

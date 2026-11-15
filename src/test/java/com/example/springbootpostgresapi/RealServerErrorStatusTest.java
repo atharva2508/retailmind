@@ -17,11 +17,29 @@ import org.springframework.http.MediaType;
  * errors that the container resolves there. Uses its own in-memory database.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "spring.datasource.url=jdbc:h2:mem:realserver;MODE=PostgreSQL;DB_CLOSE_DELAY=-1")
+        properties = {"spring.datasource.url=jdbc:h2:mem:realserver;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
+                "app.register.max-per-hour=3"})
 class RealServerErrorStatusTest {
 
     @Autowired
     private TestRestTemplate rest;
+
+    @Test
+    void registrationsPerClientAddressAreLimited() {
+        HttpHeaders json = new HttpHeaders();
+        json.setContentType(MediaType.APPLICATION_JSON);
+        int last = 0;
+        for (int i = 0; i < 4; i++) {
+            String name = "limit" + System.nanoTime();
+            last = rest.exchange("/api/auth/register", HttpMethod.POST,
+                    new HttpEntity<>(Map.of("username", name, "email", name + "@x.test", "password", "secret123"), json), String.class)
+                    .getStatusCode().value();
+            if (i < 3) {
+                assertEquals(201, last, "registration " + (i + 1));
+            }
+        }
+        assertEquals(429, last, "fourth registration from the same address");
+    }
 
     @Test
     void containerErrorsKeepTheirRealStatus() {

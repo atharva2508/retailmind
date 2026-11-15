@@ -6,3 +6,4 @@ target/
 .env
 .backup-fix1/
 CLAUDE.md
+.env.example

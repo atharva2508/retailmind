@@ -12,6 +12,7 @@ import com.example.springbootpostgresapi.repository.StockSnapshotRepository;
 import com.example.springbootpostgresapi.repository.StoreRepository;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -129,6 +130,8 @@ public class InventoryService {
         return issues;
     }
 
+    // ponytail: loads every snapshot of the store and picks the newest per product in memory.
+    // Replace with a "latest per product" query when a store holds more than a few thousand snapshots.
     public List<Map<String, Object>> getLowStock(Long storeId) {
         List<StockSnapshot> latestSnapshots = stockSnapshotRepository.findByStoreId(storeId).stream()
                 .collect(Collectors.groupingBy(snapshot -> snapshot.getProduct().getId(), Collectors.maxBy(
@@ -213,17 +216,13 @@ public class InventoryService {
     }
 
     private int sumConfirmedToday(Long storeId, LocalDate businessDate) {
-        return orderLineRepository.findByStoreId(storeId).stream()
-                .filter(line -> line.getConfirmedAt() != null)
-                .filter(line -> line.getConfirmedAt().toLocalDate().equals(businessDate))
+        return orderLineRepository.findByStoreIdAndConfirmedAtBetween(storeId, businessDate.atStartOfDay(), businessDate.atTime(LocalTime.MAX)).stream()
                 .mapToInt(line -> Math.max(line.getQtyConfirmed(), 0))
                 .sum();
     }
 
     private int sumCustomerCancelledToday(Long storeId, LocalDate businessDate) {
-        return orderLineRepository.findByStoreId(storeId).stream()
-                .filter(line -> line.getCancelledAt() != null)
-                .filter(line -> line.getCancelledAt().toLocalDate().equals(businessDate))
+        return orderLineRepository.findByStoreIdAndCancelledAtBetween(storeId, businessDate.atStartOfDay(), businessDate.atTime(LocalTime.MAX)).stream()
                 .filter(line -> "CUSTOMER".equals(line.getCancelReason()))
                 .filter(line -> line.getConfirmedAt() != null && !line.getCancelledAt().isBefore(line.getConfirmedAt()))
                 .mapToInt(line -> Math.max(line.getQtyCancelled(), 0))
@@ -240,9 +239,7 @@ public class InventoryService {
     }
 
     private int sumReturnsReceivedToday(Long storeId, LocalDate businessDate) {
-        return returnLineRepository.findByStoreId(storeId).stream()
-                .filter(line -> line.getReceivedAt() != null)
-                .filter(line -> line.getReceivedAt().toLocalDate().equals(businessDate))
+        return returnLineRepository.findByStoreIdAndReceivedAtBetween(storeId, businessDate.atStartOfDay(), businessDate.atTime(LocalTime.MAX)).stream()
                 .mapToInt(ReturnLine::getQty)
                 .sum();
     }

@@ -5,10 +5,15 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.springbootpostgresapi.entity.AuditEvent;
 import com.example.springbootpostgresapi.entity.OrderLine;
+import com.example.springbootpostgresapi.entity.Product;
+import com.example.springbootpostgresapi.repository.AuditEventRepository;
 import com.example.springbootpostgresapi.entity.PricingPromotionProposal;
 import com.example.springbootpostgresapi.repository.OrderLineRepository;
 import com.example.springbootpostgresapi.repository.StoreRepository;
@@ -58,6 +63,9 @@ class ProductControllerIntegrationTest {
 
     @Autowired
     private StoreRepository storeRepository;
+
+    @Autowired
+    private AuditEventRepository auditEventRepository;
 
     @Test
     void shouldServeHealthAndAllowAdminLogin() throws Exception {
@@ -603,6 +611,65 @@ class ProductControllerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.expectedEodBal", is(30)))
                 .andExpect(jsonPath("$.status", is("OK")));
+    }
+
+    @Test
+    void corsOnlyAllowsConfiguredOrigins() throws Exception {
+        mockMvc.perform(get("/api/health").header("Origin", "https://evil.example"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/health").header("Origin", "http://localhost:3000"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Access-Control-Allow-Origin", "http://localhost:3000"));
+    }
+
+    @Test
+    void auditEventsCannotBeChangedOrDeleted() {
+        AuditEvent event = auditEventRepository.save(AuditEvent.builder().actionType("TEST").entityType("TEST")
+                .actorUsername("tester").details("original").build());
+        event.setDetails("tampered");
+        auditEventRepository.save(event);
+        if (!"original".equals(auditEventRepository.findById(event.getId()).orElseThrow().getDetails())) {
+            throw new AssertionError("Audit event was changed");
+        }
+        try {
+            auditEventRepository.deleteById(event.getId());
+        } catch (RuntimeException expected) {
+            // delete must be refused
+        }
+        if (!auditEventRepository.existsById(event.getId())) {
+            throw new AssertionError("Audit event was deleted");
+        }
+    }
+
+    @Test
+    void loginAttemptsAreAudited() throws Exception {
+        String name = "audit_" + System.nanoTime();
+        register(name);
+        login(name, "wrong-password").andExpect(status().isUnauthorized());
+        login(name, "secret123").andExpect(status().isOk());
+        mockMvc.perform(get("/api/audit/events").header("Authorization", "Bearer " + tokenFor("admin", "admin123")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.actionType == 'LOGIN_FAILED' && @.actorUsername == '" + name + "')]").isNotEmpty())
+                .andExpect(jsonPath("$[?(@.actionType == 'LOGIN_SUCCESS' && @.actorUsername == '" + name + "')]").isNotEmpty());
+    }
+
+    @Test
+    void productPriceCannotBeChangedByPutAndEditsAreAudited() throws Exception {
+        String admin = tokenFor("admin", "admin123");
+        Product keyboard = productRepository.findBySku("SKU-3003").orElseThrow();
+        String body = "{\"sku\":\"SKU-3003\",\"name\":\"Mechanical Keyboard v2\",\"description\":\"Compact keyboard\",\"stock\":14,\"price\":";
+        mockMvc.perform(put("/api/products/" + keyboard.getId()).header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body + keyboard.getPrice().add(BigDecimal.TEN) + "}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(put("/api/products/" + keyboard.getId()).header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body + keyboard.getPrice() + "}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name", is("Mechanical Keyboard v2")));
+        mockMvc.perform(get("/api/audit/events").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.actionType == 'UPDATE' && @.entityType == 'PRODUCT' && @.entityId == " + keyboard.getId() + ")]").isNotEmpty());
     }
 
     private String row(String sku, int bal, int held) {

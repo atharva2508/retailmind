@@ -10,6 +10,7 @@ import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,8 +41,8 @@ public class ProductController {
 
     @PostMapping("/products")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<Product> createProduct(@Valid @RequestBody CreateProductRequest request) {
-        Product createdProduct = productService.createProduct(request);
+    public ResponseEntity<Product> createProduct(@Valid @RequestBody CreateProductRequest request, Authentication authentication) {
+        Product createdProduct = productService.createProduct(request, authentication.getName());
         return ResponseEntity
                 .created(URI.create("/api/products/" + createdProduct.getId()))
                 .body(createdProduct);
@@ -49,14 +50,14 @@ public class ProductController {
 
     @PutMapping("/products/{id}")
     @PreAuthorize("hasRole('ADMIN')")
-    public Product updateProduct(@PathVariable Long id, @Valid @RequestBody UpdateProductRequest request) {
-        return productService.updateProduct(id, request);
+    public Product updateProduct(@PathVariable Long id, @Valid @RequestBody UpdateProductRequest request, Authentication authentication) {
+        return productService.updateProduct(id, request, authentication.getName());
     }
 
     @DeleteMapping("/products/{id}")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
-        productService.deleteProduct(id);
+    public ResponseEntity<Void> deleteProduct(@PathVariable Long id, Authentication authentication) {
+        productService.deleteProduct(id, authentication.getName());
         return ResponseEntity.noContent().build();
     }
 }

@@ -37,6 +37,7 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
     private final JwtService jwtService;
+    private final AuditEventService auditEventService;
 
     // ponytail: in-memory, per instance. Move to DB or Redis when running more than one instance.
     private final Map<String, Attempts> failedLogins = new ConcurrentHashMap<>();
@@ -67,13 +68,13 @@ public class AuthService {
         return issueTokens(user, refreshTokenService.create(user, refreshExpiry()));
     }
 
-    @Transactional
     public AuthResponse login(LoginRequest request) {
         String username = normalize(request.username());
         Instant now = Instant.now();
         Attempts attempts = failedLogins.get(username);
         // Checked for every username, existing or not, so lockout does not reveal which accounts exist.
         if (attempts != null && attempts.lockedUntil() != null && now.isBefore(attempts.lockedUntil())) {
+            auditLogin("LOGIN_LOCKED", username, null);
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many failed logins, try again later");
         }
 
@@ -82,6 +83,7 @@ public class AuthService {
             authentication = authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, request.password()));
         } catch (AuthenticationException e) {
             recordFailure(username, now);
+            auditLogin("LOGIN_FAILED", username, null);
             throw e;
         }
         failedLogins.remove(username);
@@ -89,7 +91,14 @@ public class AuthService {
         UserDetails userDetails = (UserDetails) authentication.getPrincipal();
         User user = userRepository.findByUsername(userDetails.getUsername())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unauthorized"));
+        auditLogin("LOGIN_SUCCESS", user.getUsername(), user);
         return issueTokens(user, refreshTokenService.create(user, refreshExpiry()));
+    }
+
+    // The typed username is attacker-controlled, so cap it before it goes into the audit table.
+    private void auditLogin(String action, String username, User user) {
+        String actor = username == null ? "" : username.substring(0, Math.min(username.length(), 100));
+        auditEventService.log(action, "USER", user == null ? null : user.getId(), user == null ? null : user.getStoreId(), actor, action);
     }
 
     @Transactional(noRollbackFor = ResponseStatusException.class)

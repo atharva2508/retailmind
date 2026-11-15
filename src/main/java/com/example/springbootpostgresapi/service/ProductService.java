@@ -16,6 +16,7 @@ import org.springframework.web.server.ResponseStatusException;
 public class ProductService {
 
     private final ProductRepository productRepository;
+    private final AuditEventService auditEventService;
 
     public List<Product> getAllProducts() {
         return productRepository.findAll();
@@ -27,7 +28,7 @@ public class ProductService {
     }
 
     @Transactional
-    public Product createProduct(CreateProductRequest request) {
+    public Product createProduct(CreateProductRequest request, String actor) {
         if (productRepository.findBySku(request.sku()).isPresent()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "SKU already exists");
         }
@@ -42,12 +43,19 @@ public class ProductService {
                 .defaultReorderThreshold(0)
                 .build();
 
-        return productRepository.save(product);
+        Product saved = productRepository.save(product);
+        auditEventService.log("CREATE", "PRODUCT", saved.getId(), null, actor, "Created SKU " + saved.getSku() + " at price " + saved.getPrice());
+        return saved;
     }
 
     @Transactional
-    public Product updateProduct(Long id, UpdateProductRequest request) {
+    public Product updateProduct(Long id, UpdateProductRequest request, String actor) {
         Product existingProduct = getProductById(id);
+
+        // Price changes need review: create a pricing proposal instead.
+        if (existingProduct.getPrice().compareTo(request.price()) != 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Price cannot be changed here, create a pricing proposal");
+        }
 
         if (!existingProduct.getSku().equals(request.sku())
                 && productRepository.findBySku(request.sku()).isPresent()) {
@@ -57,17 +65,19 @@ public class ProductService {
         existingProduct.setSku(request.sku());
         existingProduct.setName(request.name());
         existingProduct.setDescription(request.description());
-        existingProduct.setPrice(request.price());
         existingProduct.setStock(request.stock());
         existingProduct.setIsEssential(existingProduct.getIsEssential() != null ? existingProduct.getIsEssential() : false);
         existingProduct.setDefaultReorderThreshold(existingProduct.getDefaultReorderThreshold() != null ? existingProduct.getDefaultReorderThreshold() : 0);
 
-        return productRepository.save(existingProduct);
+        Product saved = productRepository.save(existingProduct);
+        auditEventService.log("UPDATE", "PRODUCT", saved.getId(), null, actor, "Updated SKU " + saved.getSku());
+        return saved;
     }
 
     @Transactional
-    public void deleteProduct(Long id) {
+    public void deleteProduct(Long id, String actor) {
         Product product = getProductById(id);
         productRepository.delete(product);
+        auditEventService.log("DELETE", "PRODUCT", id, null, actor, "Deleted SKU " + product.getSku());
     }
 }

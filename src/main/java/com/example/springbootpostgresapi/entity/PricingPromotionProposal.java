@@ -5,6 +5,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.LocalDateTime;
@@ -15,7 +16,7 @@ import lombok.NoArgsConstructor;
 import org.hibernate.annotations.CreationTimestamp;
 
 @Entity
-@Table(name = "pricing_promotion_proposals")
+@Table(name = "pricing_promotion_proposals", indexes = @Index(name = "idx_proposal_store_status", columnList = "store_id, status, created_at"))
 @Data
 @NoArgsConstructor
 @AllArgsConstructor

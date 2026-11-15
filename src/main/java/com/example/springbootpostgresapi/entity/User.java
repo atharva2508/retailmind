@@ -38,9 +38,9 @@ public class User {
     @Builder.Default
     private String role = "ROLE_USER";
 
+    // Null means no store assigned yet: StoreAccessService denies every store-scoped request.
     @Column
-    @Builder.Default
-    private Long storeId = 1L;
+    private Long storeId;
 
     @CreationTimestamp
     @Column(nullable = false, updatable = false)

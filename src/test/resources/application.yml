@@ -7,6 +7,9 @@ spring:
   jpa:
     hibernate:
       ddl-auto: create-drop
+  jackson:
+    deserialization:
+      accept-float-as-int: false
 
 app:
   cors:

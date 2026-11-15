@@ -34,6 +34,8 @@ public class InventoryImportService {
 
     private static final Pattern FILE_NAME_PATTERN = Pattern.compile("^([A-Za-z0-9_-]+)_(\\d{8})_(SOD|EOD)\\.csv$");
 
+    private static final int MAX_AGE_DAYS = 30;
+
     private final InventoryImportRepository inventoryImportRepository;
     private final StoreRepository storeRepository;
     private final ProductRepository productRepository;
@@ -41,7 +43,7 @@ public class InventoryImportService {
     private final AuditEventService auditEventService;
 
     @Transactional
-    public Map<String, Object> applySyntheticImport(InventoryImportRequest request) {
+    public Map<String, Object> applySyntheticImport(InventoryImportRequest request, String actor) {
         Store store = storeRepository.findById(request.storeId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Store not found: " + request.storeId()));
 
@@ -63,6 +65,10 @@ public class InventoryImportService {
         if (asOf.isAfter(LocalDate.now())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "asOf cannot be in the future");
         }
+        // ponytail: fixed window. Make it a property if real backfills need older days.
+        if (asOf.isBefore(LocalDate.now().minusDays(MAX_AGE_DAYS))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "asOf is older than " + MAX_AGE_DAYS + " days");
+        }
 
         // The file name must agree with the body: same store, same date, same snapshot type.
         String fileName = request.fileName() == null ? "" : request.fileName().trim();
@@ -82,7 +88,7 @@ public class InventoryImportService {
         // Snapshot time comes from the file date, not from the clock at import time.
         LocalDateTime snapshotTime = snapshotType.equals("SOD") ? asOf.atStartOfDay() : asOf.atTime(23, 59, 59);
         Map<String, Product> productsBySku = productRepository.findAll().stream()
-                .collect(Collectors.toMap(product -> product.getSku().toUpperCase(), product -> product));
+                .collect(Collectors.toMap(product -> product.getSku().toUpperCase(), product -> product, (first, twin) -> first));
 
         Set<String> seenSkus = new HashSet<>();
         int unknownSkuCount = 0;
@@ -96,6 +102,9 @@ public class InventoryImportService {
             }
             if (!seenSkus.add(sku)) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Duplicate SKU in file: " + sku);
+            }
+            if (row.held() > row.bal()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "HELD cannot exceed BAL for SKU " + sku);
             }
             content.append(sku).append(',').append(row.bal()).append(',').append(row.aud()).append(',')
                     .append(row.rac()).append(',').append(row.held()).append('\n');
@@ -140,6 +149,10 @@ public class InventoryImportService {
         }
 
         String checksum = sha256(content.toString());
+        // Same store, day, type and content was already applied. Throwing rolls back the snapshots written above.
+        if (inventoryImportRepository.existsByStoreIdAndSnapshotTypeAndAsOfAndChecksum(store.getId(), snapshotType, asOf, checksum)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This file was already imported");
+        }
         InventoryImport inventoryImport = InventoryImport.builder()
                 .storeId(store.getId())
                 .storeCodeRaw(store.getStoreCode())
@@ -155,7 +168,7 @@ public class InventoryImportService {
                 .build();
 
         InventoryImport saved = inventoryImportRepository.save(inventoryImport);
-        auditEventService.log("IMPORT", "INVENTORY_IMPORT", saved.getId(), saved.getStoreId(), "system", "Imported file " + saved.getFileName() + " with row count " + saved.getRowCount());
+        auditEventService.log("IMPORT", "INVENTORY_IMPORT", saved.getId(), saved.getStoreId(), actor, "Imported file " + saved.getFileName() + " with row count " + saved.getRowCount());
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", saved.getId());
         result.put("storeId", saved.getStoreId());

@@ -66,7 +66,7 @@ public class PricingPromotionProposalService {
     }
 
     @Transactional
-    public PricingPromotionProposal createProposal(CreateProposalRequest request, Long storeId, String actor) {
+    public PricingPromotionProposal createProposal(CreateProposalRequest request, Long storeId, String actor, String creatorType) {
         String sku = request.targetSku().trim();
         Product product = productRepository.findBySku(sku)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown product SKU: " + sku));
@@ -77,10 +77,12 @@ public class PricingPromotionProposalService {
                 .proposalType(normalizeProposalType(request.proposalType()))
                 .storeId(storeId)
                 .targetSku(sku)
+                .targetProductId(product.getId())
+                .basePrice(product.getPrice())
                 .status("PENDING_REVIEW")
                 .createdBy(actor)
                 .expiresAt(LocalDateTime.now().plus(PROPOSAL_TTL))
-                .creatorType(request.creatorType() == null || request.creatorType().isBlank() ? "STORE_MANAGER" : request.creatorType())
+                .creatorType(creatorType)
                 .rationale(request.rationale() == null || request.rationale().isBlank() ? "Vendor pricing review requested." : request.rationale())
                 .proposedValues(values)
                 .sourceRefs(request.sourceRefs() == null || request.sourceRefs().isBlank() ? "manual-entry" : request.sourceRefs())
@@ -124,9 +126,18 @@ public class PricingPromotionProposalService {
 
         requireStatus(proposal, "APPROVED");
         requireNotExpired(proposal);
-        Product product = productRepository.findBySku(proposal.getTargetSku())
+        // Rows created before these fields existed have nulls: fall back to the SKU and skip the price check.
+        Product product = (proposal.getTargetProductId() != null
+                ? productRepository.findById(proposal.getTargetProductId())
+                : productRepository.findBySku(proposal.getTargetSku()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT, "Product no longer exists: " + proposal.getTargetSku()));
+        if (!product.getSku().equals(proposal.getTargetSku())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Product SKU changed since the proposal was created");
+        }
         BigDecimal oldPrice = product.getPrice();
+        if (proposal.getBasePrice() != null && oldPrice.compareTo(proposal.getBasePrice()) != 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Price changed since the proposal was created, create a new proposal");
+        }
         BigDecimal price = newPrice(product, proposal.getProposedValues());
 
         // ponytail: product price is global, not per store; per-store pricing needs its own table.
@@ -197,15 +208,12 @@ public class PricingPromotionProposalService {
     }
 
     private String normalizeProposalType(String proposalType) {
-        if (proposalType == null || proposalType.isBlank()) {
-            return "DISCOUNT";
-        }
         String normalized = proposalType.trim().toUpperCase();
         return switch (normalized) {
             case "PRICE_ADJUSTMENT", "PRICE", "DISCOUNT" -> "DISCOUNT";
             case "PROMOTION" -> "PROMOTION";
             case "CLEARANCE" -> "CLEARANCE";
-            default -> "DISCOUNT";
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "proposalType must be DISCOUNT, PROMOTION or CLEARANCE");
         };
     }
 }

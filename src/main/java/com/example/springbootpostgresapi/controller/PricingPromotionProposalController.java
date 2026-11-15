@@ -51,7 +51,8 @@ public class PricingPromotionProposalController {
     public ResponseEntity<PricingPromotionProposal> createProposal(@Valid @RequestBody CreateProposalRequest request,
                                                                      Authentication authentication) {
         Long store = storeAccessService.resolveStore(authentication, request.storeId());
-        PricingPromotionProposal created = pricingPromotionProposalService.createProposal(request, store, authentication.getName());
+        PricingPromotionProposal created = pricingPromotionProposalService.createProposal(request, store, authentication.getName(),
+                authentication.getAuthorities().iterator().next().getAuthority().replace("ROLE_", ""));
         return ResponseEntity.created(URI.create("/api/proposals/" + created.getId())).body(created);
     }
 

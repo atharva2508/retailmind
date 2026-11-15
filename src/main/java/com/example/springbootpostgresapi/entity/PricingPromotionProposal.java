@@ -66,5 +66,11 @@ public class PricingPromotionProposal {
     private LocalDateTime decidedAt;
     private LocalDateTime appliedAt;
     private LocalDateTime expiresAt;
+
+    // The product and price the proposal was written and reviewed against. Apply refuses if either changed.
+    private Long targetProductId;
+
+    @Column(precision = 10, scale = 2)
+    private java.math.BigDecimal basePrice;
     private String createdBy;
 }

@@ -29,12 +29,13 @@ public class ProductService {
 
     @Transactional
     public Product createProduct(CreateProductRequest request, String actor) {
-        if (productRepository.findBySku(request.sku()).isPresent()) {
+        String sku = request.sku().trim().toUpperCase();
+        if (productRepository.existsBySkuIgnoreCase(sku)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "SKU already exists");
         }
 
         Product product = Product.builder()
-                .sku(request.sku())
+                .sku(sku)
                 .name(request.name())
                 .description(request.description())
                 .price(request.price())
@@ -57,12 +58,12 @@ public class ProductService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Price cannot be changed here, create a pricing proposal");
         }
 
-        if (!existingProduct.getSku().equals(request.sku())
-                && productRepository.findBySku(request.sku()).isPresent()) {
+        String sku = request.sku().trim().toUpperCase();
+        if (!existingProduct.getSku().equalsIgnoreCase(sku) && productRepository.existsBySkuIgnoreCase(sku)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "SKU already exists");
         }
 
-        existingProduct.setSku(request.sku());
+        existingProduct.setSku(sku);
         existingProduct.setName(request.name());
         existingProduct.setDescription(request.description());
         existingProduct.setStock(request.stock());

@@ -4,6 +4,7 @@ import com.example.springbootpostgresapi.dto.CreateProductRequest;
 import com.example.springbootpostgresapi.dto.UpdateProductRequest;
 import com.example.springbootpostgresapi.entity.Product;
 import com.example.springbootpostgresapi.service.ProductService;
+import com.example.springbootpostgresapi.service.StoreAccessService;
 import jakarta.validation.Valid;
 import java.net.URI;
 import java.util.List;
@@ -26,16 +27,19 @@ import org.springframework.web.bind.annotation.RestController;
 public class ProductController {
 
     private final ProductService productService;
+    private final StoreAccessService storeAccessService;
 
     @GetMapping("/products")
     @PreAuthorize("hasAnyRole('USER','ADMIN')")
-    public List<Product> getAllProducts() {
+    public List<Product> getAllProducts(Authentication authentication) {
+        storeAccessService.scopeOrNull(authentication); // users without a store see nothing
         return productService.getAllProducts();
     }
 
     @GetMapping("/products/{id}")
     @PreAuthorize("hasAnyRole('USER','ADMIN')")
-    public Product getProductById(@PathVariable Long id) {
+    public Product getProductById(@PathVariable Long id, Authentication authentication) {
+        storeAccessService.scopeOrNull(authentication);
         return productService.getProductById(id);
     }
 

@@ -7,7 +7,6 @@ import jakarta.validation.constraints.Size;
 public record CreateProposalRequest(
         @NotBlank @Size(max = 255) String proposalType,
         @NotBlank @Size(max = 255) String targetSku,
-        @Size(max = 255) String creatorType,
         @Size(max = 4000) String rationale,
         @Size(max = 4000) String proposedValues,
         @Size(max = 4000) String sourceRefs,

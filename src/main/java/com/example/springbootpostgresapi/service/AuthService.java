@@ -39,7 +39,10 @@ public class AuthService {
     private final JwtService jwtService;
     private final AuditEventService auditEventService;
 
+    // Keyed by username + client address, so a stranger guessing passwords locks only themself out,
+    // not the real owner logging in from somewhere else.
     // ponytail: in-memory, per instance. Move to DB or Redis when running more than one instance.
+    // Behind a reverse proxy getRemoteAddr() is the proxy: configure server.forward-headers-strategy.
     private final Map<String, Attempts> failedLogins = new ConcurrentHashMap<>();
 
     /** Usernames and emails are compared case-insensitively by storing and looking them up in lower case. */
@@ -51,6 +54,10 @@ public class AuthService {
     public AuthResponse register(RegisterRequest request) {
         String username = normalize(request.username());
         String email = normalize(request.email());
+        // bcrypt only reads the first 72 bytes; anything longer would be silently cut.
+        if (request.password().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Password is too long");
+        }
         if (userRepository.findByUsername(username).isPresent() || userRepository.findByEmail(email).isPresent()) {
             // One message for both, so the response does not say which one exists.
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Username or email is not available");
@@ -61,20 +68,19 @@ public class AuthService {
                 .email(email)
                 .password(passwordEncoder.encode(request.password()))
                 .role("ROLE_USER")
-                .storeId(1L)
                 .build();
 
         userRepository.save(user);
         return issueTokens(user, refreshTokenService.create(user, refreshExpiry()));
     }
 
-    public AuthResponse login(LoginRequest request) {
+    public AuthResponse login(LoginRequest request, String clientAddress) {
         String username = normalize(request.username());
+        String key = username + "|" + clientAddress;
         Instant now = Instant.now();
-        Attempts attempts = failedLogins.get(username);
+        Attempts attempts = failedLogins.get(key);
         // Checked for every username, existing or not, so lockout does not reveal which accounts exist.
         if (attempts != null && attempts.lockedUntil() != null && now.isBefore(attempts.lockedUntil())) {
-            auditLogin("LOGIN_LOCKED", username, null);
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many failed logins, try again later");
         }
 
@@ -82,11 +88,17 @@ public class AuthService {
         try {
             authentication = authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, request.password()));
         } catch (AuthenticationException e) {
-            recordFailure(username, now);
-            auditLogin("LOGIN_FAILED", username, null);
+            boolean nowLocked = recordFailure(key, now);
+            // Only real accounts are audited, and the lock is logged once, so guessing cannot flood the audit trail.
+            userRepository.findByUsername(username).ifPresent(known -> {
+                auditLogin("LOGIN_FAILED", username, known);
+                if (nowLocked) {
+                    auditLogin("LOGIN_LOCKED", username, known);
+                }
+            });
             throw e;
         }
-        failedLogins.remove(username);
+        failedLogins.remove(key);
 
         UserDetails userDetails = (UserDetails) authentication.getPrincipal();
         User user = userRepository.findByUsername(userDetails.getUsername())
@@ -111,14 +123,16 @@ public class AuthService {
         refreshTokenService.revoke(request.refreshToken());
     }
 
-    private void recordFailure(String username, Instant now) {
+    /** Returns true when this failure is the one that starts the lock. */
+    private boolean recordFailure(String key, Instant now) {
         if (failedLogins.size() >= MAX_TRACKED_USERNAMES) {
             failedLogins.values().removeIf(a -> a.lastFailure().isBefore(now.minus(LOCK_TIME)));
         }
-        failedLogins.compute(username, (key, old) -> {
+        Attempts updated = failedLogins.compute(key, (k, old) -> {
             int failures = old == null || old.lastFailure().isBefore(now.minus(LOCK_TIME)) ? 1 : old.failures() + 1;
             return new Attempts(failures, failures >= MAX_FAILURES ? now.plus(LOCK_TIME) : null, now);
         });
+        return updated.failures() == MAX_FAILURES;
     }
 
     private Instant refreshExpiry() {

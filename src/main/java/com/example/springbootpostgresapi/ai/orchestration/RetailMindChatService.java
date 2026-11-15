@@ -84,17 +84,13 @@ public class RetailMindChatService {
                 resultPayload.add(productResponse.get(0));
             }
             toolCalls.add(toolCall("getProductDetails", args));
-        } else {
-            Map<String, String> args = new LinkedHashMap<>();
-            if (storeId != null) {
-                args.put("storeId", storeId.toString());
-            }
-            resultPayload.addAll(toolService.executeTool("getLowStockProducts", args));
-            toolCalls.add(toolCall("getLowStockProducts", args));
         }
 
         response.put("toolCalls", toolCalls);
-        response.put("answer", summarize(resultPayload));
+        // No keyword matched: say what is supported instead of guessing a tool.
+        response.put("answer", toolCalls.isEmpty()
+                ? "I can answer questions about low stock, the dashboard summary, discount suggestions, reconciliation, fulfillment issues, or a product by its id."
+                : summarize(resultPayload));
         response.put("data", resultPayload);
         return response;
     }
@@ -106,6 +102,9 @@ public class RetailMindChatService {
 
         if (resultPayload.size() == 1 && resultPayload.get(0).containsKey("expectedEodBal")) {
             Map<String, Object> reconciliation = resultPayload.get(0);
+            if ("NO_DATA".equals(reconciliation.get("status"))) {
+                return "No snapshot data for " + reconciliation.get("businessDate") + ", so reconciliation is not possible for that day.";
+            }
             return "Reconciliation summary: expected EOD balance " + reconciliation.get("expectedEodBal")
                     + ", bal variance " + reconciliation.get("balVariance") + ", RAC variance " + reconciliation.get("racVariance") + ".";
         }
@@ -113,6 +112,9 @@ public class RetailMindChatService {
         for (Map<String, Object> item : resultPayload) {
             Object status = item.get("status");
             if (status != null && (status.toString().contains("AT_RISK") || status.toString().contains("OUT_OF_STOCK"))) {
+                if ("STALE".equals(item.get("dataStatus"))) {
+                    return "Stock data is STALE (latest snapshot " + item.get("asOf") + "). It showed at-risk or unavailable stock at that time. Refresh the inventory feed before ordering.";
+                }
                 return "The current inventory scan shows at-risk or unavailable stock. Review the returned items before ordering more inventory.";
             }
             Object proposalType = item.get("proposalType");

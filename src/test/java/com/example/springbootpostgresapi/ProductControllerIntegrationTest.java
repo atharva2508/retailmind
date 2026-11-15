@@ -1,5 +1,7 @@
 package com.example.springbootpostgresapi;
 
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -136,7 +138,8 @@ class ProductControllerIntegrationTest {
 
         String token = objectMapper.readTree(result.getResponse().getContentAsString()).get("accessToken").asText();
 
-        String requestBody = "{\"storeId\":2,\"snapshotType\":\"SOD\",\"asOf\":\"2026-11-06\",\"fileName\":\"NORTH_20261106_SOD.csv\",\"rows\":[{\"sku\":\"SKU-1001\",\"bal\":20,\"aud\":21,\"rac\":1,\"held\":3},{\"sku\":\"SKU-2002\",\"bal\":8,\"aud\":8,\"rac\":0,\"held\":1}]}";
+        LocalDate importDay = LocalDate.now().minusDays(6);
+        String requestBody = "{\"storeId\":2,\"snapshotType\":\"SOD\",\"asOf\":\"" + importDay + "\",\"fileName\":\"NORTH_" + importDay.toString().replace("-", "") + "_SOD.csv\",\"rows\":[{\"sku\":\"SKU-1001\",\"bal\":20,\"aud\":21,\"rac\":1,\"held\":3},{\"sku\":\"SKU-2002\",\"bal\":8,\"aud\":8,\"rac\":0,\"held\":1}]}";
 
         mockMvc.perform(post("/api/admin/inventory-imports/synthetic")
                         .header("Authorization", "Bearer " + token)
@@ -167,7 +170,7 @@ class ProductControllerIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"show me low stock for store 1\",\"storeId\":1,\"conversationId\":\"conv-1\"}"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.answer", is("The current inventory scan shows at-risk or unavailable stock. Review the returned items before ordering more inventory.")))
+                .andExpect(jsonPath("$.answer", containsString("STALE")))
                 .andExpect(jsonPath("$.toolCalls[0].toolName", is("getLowStockProducts")));
     }
 
@@ -670,6 +673,169 @@ class ProductControllerIntegrationTest {
         mockMvc.perform(get("/api/audit/events").header("Authorization", "Bearer " + admin))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.actionType == 'UPDATE' && @.entityType == 'PRODUCT' && @.entityId == " + keyboard.getId() + ")]").isNotEmpty());
+    }
+
+    @Test
+    void selfRegisteredUserHasNoStoreAccess() throws Exception {
+        String token = register("nostore_" + System.nanoTime()).get("accessToken").asText();
+        for (String path : new String[] {"/api/dashboard/summary", "/api/products/low-stock", "/api/products", "/api/proposals"}) {
+            mockMvc.perform(get(path).header("Authorization", "Bearer " + token)).andExpect(status().isForbidden());
+        }
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"summary\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void lockoutIsPerClientAddressSoAStrangerCannotLockTheOwnerOut() throws Exception {
+        String name = "owner_" + System.nanoTime();
+        register(name);
+        for (int i = 0; i < 5; i++) {
+            login(name, "wrong-password").andExpect(status().isUnauthorized());
+        }
+        login(name, "secret123").andExpect(status().isTooManyRequests());
+        mockMvc.perform(post("/api/auth/login").with(request -> {
+                    request.setRemoteAddr("10.0.0.9");
+                    return request;
+                }).contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new LoginRequest(name, "secret123"))))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void failedLoginsDoNotFloodTheAuditTrail() throws Exception {
+        String ghost = "ghost" + System.nanoTime() + "_";
+        for (int i = 0; i < 10; i++) {
+            login(ghost + i, "x").andExpect(status().isUnauthorized());
+        }
+        String name = "noisy_" + System.nanoTime();
+        register(name);
+        for (int i = 0; i < 9; i++) {
+            login(name, "wrong-password");
+        }
+        Integer ghostRows = jdbcTemplate.queryForObject("select count(*) from audit_events where actor_username like ?", Integer.class, ghost + "%");
+        Integer failed = jdbcTemplate.queryForObject("select count(*) from audit_events where actor_username = ? and action_type = 'LOGIN_FAILED'", Integer.class, name);
+        Integer locked = jdbcTemplate.queryForObject("select count(*) from audit_events where actor_username = ? and action_type = 'LOGIN_LOCKED'", Integer.class, name);
+        if (ghostRows != 0 || failed != 5 || locked != 1) {
+            throw new AssertionError("Audit rows: unknown users " + ghostRows + " (want 0), failed " + failed + " (want 5), locked " + locked + " (want 1)");
+        }
+    }
+
+    @Test
+    void approvedProposalCannotBeRedirectedToAnotherProductBySkuSwap() throws Exception {
+        String admin = tokenFor("admin", "admin123");
+        Product keyboard = productRepository.findBySku("SKU-3003").orElseThrow();
+        Product mouse = productRepository.findBySku("SKU-1001").orElseThrow();
+        long id = createProposal(tokenFor("store_manager", "manager123"), "{\\\"discountPercent\\\":10}", "SKU-3003");
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isOk());
+        try {
+            putProduct(admin, keyboard, "SKU-SWAP").andExpect(status().isOk());
+            putProduct(admin, mouse, "SKU-3003").andExpect(status().isOk());
+            mockMvc.perform(post("/api/proposals/" + id + "/apply").header("Authorization", "Bearer " + admin))
+                    .andExpect(status().isConflict());
+            if (productRepository.findById(mouse.getId()).orElseThrow().getPrice().compareTo(mouse.getPrice()) != 0) {
+                throw new AssertionError("Proposal for the keyboard changed the mouse price");
+            }
+        } finally {
+            putProduct(admin, mouse, "SKU-1001");
+            putProduct(admin, keyboard, "SKU-3003");
+        }
+    }
+
+    @Test
+    void secondProposalOnAChangedPriceIsRefused() throws Exception {
+        String manager = tokenFor("store_manager", "manager123");
+        String reviewer = tokenFor("reviewer", "reviewer123");
+        String admin = tokenFor("admin", "admin123");
+        long first = createProposal(manager, "{\\\"discountPercent\\\":10}");
+        long second = createProposal(manager, "{\\\"discountPercent\\\":10}");
+        for (long id : new long[] {first, second}) {
+            mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + reviewer)
+                            .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"APPROVE\"}"))
+                    .andExpect(status().isOk());
+        }
+        mockMvc.perform(post("/api/proposals/" + first + "/apply").header("Authorization", "Bearer " + admin)).andExpect(status().isOk());
+        mockMvc.perform(post("/api/proposals/" + second + "/apply").header("Authorization", "Bearer " + admin)).andExpect(status().isConflict());
+    }
+
+    @Test
+    void importRejectsNullRow() throws Exception {
+        importSnapshot(LocalDate.now().minusDays(9), "SOD", "null," + row("SKU-2002", 5, 0) + "," + row("SKU-3003", 5, 0))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void skuIsUniqueIgnoringCase() throws Exception {
+        mockMvc.perform(post("/api/products").header("Authorization", "Bearer " + tokenFor("admin", "admin123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sku\":\"sku-1001\",\"name\":\"twin\",\"price\":1,\"stock\":1}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void registerRejectsOverlongPasswordsAndOddUsernames() throws Exception {
+        String n = "rules_" + System.nanoTime();
+        String[][] bad = {
+                {n + "a", "a".repeat(73)},
+                {n + "b", "p".repeat(100_000)},
+                {"<img src=x onerror=alert(1)>", "secret123"},
+                {"\uFF41dmin", "secret123"},
+                {"ab", "secret123"}
+        };
+        for (String[] pair : bad) {
+            mockMvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(java.util.Map.of("username", pair[0], "email", "r" + System.nanoTime() + "@x.test", "password", pair[1]))))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
+    @Test
+    void proposalCreatorTypeComesFromLoginAndTypeMustBeKnown() throws Exception {
+        String manager = tokenFor("store_manager", "manager123");
+        mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + manager).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-3003\",\"creatorType\":\"SYSTEM\",\"proposedValues\":\"{\\\"discountPercent\\\":5}\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.creatorType", is("STORE_MANAGER")));
+        mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + manager).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"proposalType\":\"DELETE_EVERYTHING\",\"targetSku\":\"SKU-3003\",\"proposedValues\":\"{\\\"discountPercent\\\":5}\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void importChecksContentDuplicatesAgeAndRecordsTheActor() throws Exception {
+        LocalDate day = LocalDate.now().minusDays(10);
+        String cable = row("SKU-2002", 5, 0);
+        importSnapshot(day, "SOD", row("SKU-1001", 2, 500) + "," + cable).andExpect(status().isBadRequest());
+        importSnapshot(day, "SOD", "{\"sku\":\"SKU-1001\",\"bal\":1.9,\"aud\":1,\"rac\":0,\"held\":0}," + cable).andExpect(status().isBadRequest());
+        importSnapshot(LocalDate.now().minusDays(60), "SOD", row("SKU-1001", 7, 0) + "," + cable).andExpect(status().isBadRequest());
+        importSnapshot(day, "SOD", row("SKU-1001", 7, 0) + "," + cable).andExpect(status().isOk());
+        importSnapshot(day, "SOD", row("SKU-1001", 7, 0) + "," + cable).andExpect(status().isConflict());
+        Integer bySystem = jdbcTemplate.queryForObject("select count(*) from audit_events where action_type = 'IMPORT' and actor_username = 'system'", Integer.class);
+        if (bySystem != 0) {
+            throw new AssertionError("Import audit rows name 'system' instead of the admin: " + bySystem);
+        }
+    }
+
+    @Test
+    void chatDoesNotPresentOldOrMissingDataAsCurrentAndDoesNotGuess() throws Exception {
+        String admin = tokenFor("admin", "admin123");
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"reconciliation\",\"storeId\":3}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.answer", containsString("No snapshot data")));
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"hello\",\"storeId\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.toolCalls", empty()));
+    }
+
+    private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {
+        return mockMvc.perform(put("/api/products/" + product.getId()).header("Authorization", "Bearer " + adminToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(java.util.Map.of("sku", sku, "name", product.getName(),
+                        "description", product.getDescription(), "price", product.getPrice(), "stock", product.getStock()))));
     }
 
     private String row(String sku, int bal, int held) {

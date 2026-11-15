@@ -5,6 +5,7 @@ import com.example.springbootpostgresapi.dto.LoginRequest;
 import com.example.springbootpostgresapi.dto.RegisterRequest;
 import com.example.springbootpostgresapi.dto.TokenRefreshRequest;
 import com.example.springbootpostgresapi.service.AuthService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -27,8 +28,8 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
-        return ResponseEntity.ok(authService.login(request));
+    public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request, HttpServletRequest http) {
+        return ResponseEntity.ok(authService.login(request, http.getRemoteAddr()));
     }
 
     @PostMapping("/refresh")

@@ -13,7 +13,7 @@ public record InventoryImportRequest(
         @NotBlank(message = "Snapshot type is required") String snapshotType,
         @NotBlank(message = "File name is required") String fileName,
         @NotBlank(message = "asOf is required") String asOf,
-        @Valid @Size(max = 50000) List<InventoryRow> rows
+        @Valid @Size(max = 50000) List<@NotNull InventoryRow> rows
 ) {
     public record InventoryRow(
             @NotBlank(message = "SKU is required") String sku,

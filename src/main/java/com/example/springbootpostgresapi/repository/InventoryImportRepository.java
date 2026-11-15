@@ -8,4 +8,6 @@ import org.springframework.stereotype.Repository;
 @Repository
 public interface InventoryImportRepository extends JpaRepository<InventoryImport, Long> {
     List<InventoryImport> findAllByOrderByReceivedAtDesc();
+
+    boolean existsByStoreIdAndSnapshotTypeAndAsOfAndChecksum(Long storeId, String snapshotType, java.time.LocalDate asOf, String checksum);
 }

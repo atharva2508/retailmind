@@ -10,6 +10,9 @@ spring:
     hibernate:
       ddl-auto: update
     show-sql: false
+  jackson:
+    deserialization:
+      accept-float-as-int: false
 
 server:
   port: 8080

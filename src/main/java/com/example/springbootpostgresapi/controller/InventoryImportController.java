@@ -8,6 +8,7 @@ import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -21,8 +22,8 @@ public class InventoryImportController {
 
     @PostMapping("/api/admin/inventory-imports/synthetic")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<Map<String, Object>> applySyntheticImport(@Valid @RequestBody InventoryImportRequest request) {
-        return ResponseEntity.ok(inventoryImportService.applySyntheticImport(request));
+    public ResponseEntity<Map<String, Object>> applySyntheticImport(@Valid @RequestBody InventoryImportRequest request, Authentication authentication) {
+        return ResponseEntity.ok(inventoryImportService.applySyntheticImport(request, authentication.getName()));
     }
 
     @GetMapping("/api/admin/inventory-imports")

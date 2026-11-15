@@ -6,6 +6,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.LocalDateTime;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -36,9 +37,9 @@ public class PricingPromotionProposal {
     @Column(nullable = false)
     private String status;
 
+    @Version
     @Column(nullable = false)
-    @Builder.Default
-    private Integer version = 1;
+    private Integer version;
 
     @Column(nullable = false)
     private String creatorType;
@@ -63,4 +64,6 @@ public class PricingPromotionProposal {
 
     private LocalDateTime decidedAt;
     private LocalDateTime appliedAt;
+    private LocalDateTime expiresAt;
+    private String createdBy;
 }

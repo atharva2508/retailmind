@@ -7,7 +7,17 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.springbootpostgresapi.entity.PricingPromotionProposal;
+import com.example.springbootpostgresapi.repository.PricingPromotionProposalRepository;
+import com.example.springbootpostgresapi.repository.ProductRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.Date;
+import javax.crypto.SecretKey;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -25,6 +35,12 @@ class ProductControllerIntegrationTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private PricingPromotionProposalRepository proposalRepository;
+
+    @Autowired
+    private ProductRepository productRepository;
 
     @Test
     void shouldServeHealthAndAllowAdminLogin() throws Exception {
@@ -141,7 +157,7 @@ class ProductControllerIntegrationTest {
         String token = objectMapper.readTree(result.getResponse().getContentAsString()).get("accessToken").asText();
 
         MvcResult createResult = mockMvc.perform(post("/api/proposals")
-                        .header("Authorization", "Bearer " + token)
+                        .header("Authorization", "Bearer " + tokenFor("store_manager", "manager123"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-2002\",\"creatorType\":\"STORE_MANAGER\",\"rationale\":\"Low stock risk on USB-C cable\",\"proposedValues\":\"{\\\"discountPercent\\\":10,\\\"durationDays\\\":7}\",\"sourceRefs\":\"inventory.low-stock.store.1\"}"))
                 .andExpect(status().isCreated())
@@ -151,7 +167,7 @@ class ProductControllerIntegrationTest {
         Long proposalId = objectMapper.readTree(createResult.getResponse().getContentAsString()).get("id").asLong();
 
         mockMvc.perform(post("/api/proposals/" + proposalId + "/review")
-                        .header("Authorization", "Bearer " + token)
+                        .header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"decision\":\"APPROVE\",\"reviewerUsername\":\"admin\",\"reviewComment\":\"Approved based on low-stock risk\"}"))
                 .andExpect(status().isOk())
@@ -288,7 +304,7 @@ class ProductControllerIntegrationTest {
         String admin = tokenFor("admin", "admin123");
         MvcResult created = mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + admin)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-2002\",\"storeId\":2}"))
+                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-2002\",\"storeId\":2,\"proposedValues\":\"{\\\"discountPercent\\\":5}\"}"))
                 .andExpect(status().isCreated())
                 .andReturn();
         long id = objectMapper.readTree(created.getResponse().getContentAsString()).get("id").asLong();
@@ -297,13 +313,152 @@ class ProductControllerIntegrationTest {
         mockMvc.perform(get("/api/proposals").header("Authorization", "Bearer " + manager))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.id == " + id + ")]").isEmpty());
-        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + manager)
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"decision\":\"APPROVE\"}"))
                 .andExpect(status().isNotFound());
         mockMvc.perform(get("/api/audit/events").header("Authorization", "Bearer " + manager))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.storeId == 2)]").isEmpty());
+    }
+
+    @Test
+    void reviewerComesFromLoginNotRequestBody() throws Exception {
+        long id = createProposal(tokenFor("store_manager", "manager123"), "{\\\"discountPercent\\\":10}");
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\",\"reviewerUsername\":\"admin\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reviewerUsername", is("reviewer")));
+    }
+
+    @Test
+    void storeManagerCannotReview() throws Exception {
+        long id = createProposal(tokenFor("admin", "admin123"), "{\\\"discountPercent\\\":10}");
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + tokenFor("store_manager", "manager123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void creatorCannotApproveOwnProposal() throws Exception {
+        String reviewer = tokenFor("reviewer", "reviewer123");
+        long id = createProposal(reviewer, "{\\\"discountPercent\\\":10}");
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + reviewer)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void reviewOnlyFromPendingReview() throws Exception {
+        long id = createProposal(tokenFor("store_manager", "manager123"), "{\\\"discountPercent\\\":10}");
+        String reviewer = tokenFor("reviewer", "reviewer123");
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + reviewer)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"REJECT\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + reviewer)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void expiredProposalCannotBeReviewed() throws Exception {
+        long id = createProposal(tokenFor("store_manager", "manager123"), "{\\\"discountPercent\\\":10}");
+        PricingPromotionProposal p = proposalRepository.findById(id).orElseThrow();
+        p.setExpiresAt(LocalDateTime.now().minusMinutes(1));
+        proposalRepository.save(p);
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void proposalWithoutPriceChangeIsRejected() throws Exception {
+        mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + tokenFor("store_manager", "manager123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-1001\",\"proposedValues\":\"{\\\"discountPercent\\\":150}\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void applyChangesThePrice() throws Exception {
+        BigDecimal before = productRepository.findBySku("SKU-1001").orElseThrow().getPrice();
+        long id = createProposal(tokenFor("store_manager", "manager123"), "{\\\"newPrice\\\":" + before.add(BigDecimal.ONE) + "}", "SKU-1001");
+        mockMvc.perform(post("/api/proposals/" + id + "/review").header("Authorization", "Bearer " + tokenFor("reviewer", "reviewer123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\"}"))
+                .andExpect(status().isOk());
+        String admin = tokenFor("admin", "admin123");
+        mockMvc.perform(post("/api/proposals/" + id + "/apply").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk());
+        if (productRepository.findBySku("SKU-1001").orElseThrow().getPrice().compareTo(before.add(BigDecimal.ONE)) != 0) {
+            throw new AssertionError("Price was not changed by apply");
+        }
+        mockMvc.perform(post("/api/proposals/" + id + "/apply").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void badJwtReturns401() throws Exception {
+        SecretKey key = Keys.hmacShaKeyFor("test-only-secret-key-0123456789-abcdefghijklmnop".getBytes(StandardCharsets.UTF_8));
+        String expired = Jwts.builder().subject("admin").claim("token_type", "access")
+                .issuedAt(new Date(System.currentTimeMillis() - 120_000))
+                .expiration(new Date(System.currentTimeMillis() - 60_000)).signWith(key).compact();
+        String unknownUser = Jwts.builder().subject("ghost").claim("token_type", "access")
+                .expiration(new Date(System.currentTimeMillis() + 60_000)).signWith(key).compact();
+        for (String token : new String[] {"garbage", expired, unknownUser}) {
+            mockMvc.perform(get("/api/products/low-stock").param("storeId", "1").header("Authorization", "Bearer " + token))
+                    .andExpect(status().isUnauthorized());
+        }
+    }
+
+    @Test
+    void badDateReturns400() throws Exception {
+        mockMvc.perform(get("/api/stores/1/reconciliation").param("date", "not-a-date")
+                        .header("Authorization", "Bearer " + tokenFor("admin", "admin123")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void badNumberReturns400() throws Exception {
+        mockMvc.perform(post("/api/chat").header("Authorization", "Bearer " + tokenFor("admin", "admin123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"details for product 99999999999999999999999\",\"storeId\":1}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void tooLongForDbReturns400() throws Exception {
+        mockMvc.perform(post("/api/products").header("Authorization", "Bearer " + tokenFor("admin", "admin123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sku\":\"SKU-LONG\",\"name\":\"Long\",\"price\":1,\"stock\":1,\"description\":\"" + "x".repeat(600) + "\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void proposalTextSizeIsLimited() throws Exception {
+        mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + tokenFor("store_manager", "manager123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"SKU-2002\",\"proposedValues\":\"{\\\"discountPercent\\\":5}\",\"rationale\":\"" + "x".repeat(4001) + "\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    private long createProposal(String token, String escapedValues) throws Exception {
+        return createProposal(token, escapedValues, "SKU-2002");
+    }
+
+    private long createProposal(String token, String escapedValues, String sku) throws Exception {
+        MvcResult created = mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\"" + sku + "\",\"proposedValues\":\"" + escapedValues + "\"}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return objectMapper.readTree(created.getResponse().getContentAsString()).get("id").asLong();
     }
 
     private String tokenFor(String username, String password) throws Exception {

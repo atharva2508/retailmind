@@ -56,7 +56,7 @@ public class PricingPromotionProposalController {
     }
 
     @PostMapping("/proposals/{id}/review")
-    @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','REVIEWER')")
+    @PreAuthorize("hasAnyRole('ADMIN','REVIEWER')")
     public PricingPromotionProposal reviewProposal(@PathVariable Long id, @Valid @RequestBody ReviewProposalRequest request,
                                                Authentication authentication) {
         return pricingPromotionProposalService.reviewProposal(id, request, storeAccessService.scopeOrNull(authentication), authentication.getName());

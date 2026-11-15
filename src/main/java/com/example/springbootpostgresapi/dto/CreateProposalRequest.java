@@ -1,14 +1,16 @@
 package com.example.springbootpostgresapi.dto;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 
+// Sizes match the pricing_promotion_proposals columns.
 public record CreateProposalRequest(
-        @NotBlank String proposalType,
-        @NotBlank String targetSku,
-        String creatorType,
-        String rationale,
-        String proposedValues,
-        String sourceRefs,
+        @NotBlank @Size(max = 255) String proposalType,
+        @NotBlank @Size(max = 255) String targetSku,
+        @Size(max = 255) String creatorType,
+        @Size(max = 4000) String rationale,
+        @Size(max = 4000) String proposedValues,
+        @Size(max = 4000) String sourceRefs,
         Long storeId
 ) {
 }

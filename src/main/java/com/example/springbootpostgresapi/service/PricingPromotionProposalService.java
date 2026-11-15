@@ -6,10 +6,17 @@ import com.example.springbootpostgresapi.entity.PricingPromotionProposal;
 import com.example.springbootpostgresapi.entity.Product;
 import com.example.springbootpostgresapi.repository.PricingPromotionProposalRepository;
 import com.example.springbootpostgresapi.repository.ProductRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -22,6 +29,11 @@ public class PricingPromotionProposalService {
     private final ProductRepository productRepository;
     private final InventoryService inventoryService;
     private final AuditEventService auditEventService;
+    private final ObjectMapper objectMapper;
+
+    private static final Duration PROPOSAL_TTL = Duration.ofDays(7);
+    private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+    private static final BigDecimal MAX_PRICE = new BigDecimal("99999999.99");
 
     public List<PricingPromotionProposal> listAll(Long scope) {
         return scope == null ? proposalRepository.findAllByOrderByCreatedAtDesc()
@@ -58,18 +70,21 @@ public class PricingPromotionProposalService {
     @Transactional
     public PricingPromotionProposal createProposal(CreateProposalRequest request, Long storeId, String actor) {
         String sku = request.targetSku().trim();
-        productRepository.findBySku(sku)
+        Product product = productRepository.findBySku(sku)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown product SKU: " + sku));
+        String values = request.proposedValues() == null || request.proposedValues().isBlank() ? "{}" : request.proposedValues();
+        newPrice(product, values);
 
         PricingPromotionProposal proposal = PricingPromotionProposal.builder()
                 .proposalType(normalizeProposalType(request.proposalType()))
                 .storeId(storeId)
                 .targetSku(sku)
                 .status("PENDING_REVIEW")
-                .version(1)
+                .createdBy(actor)
+                .expiresAt(LocalDateTime.now().plus(PROPOSAL_TTL))
                 .creatorType(request.creatorType() == null || request.creatorType().isBlank() ? "STORE_MANAGER" : request.creatorType())
                 .rationale(request.rationale() == null || request.rationale().isBlank() ? "Vendor pricing review requested." : request.rationale())
-                .proposedValues(request.proposedValues() == null || request.proposedValues().isBlank() ? "{}" : request.proposedValues())
+                .proposedValues(values)
                 .sourceRefs(request.sourceRefs() == null || request.sourceRefs().isBlank() ? "manual-entry" : request.sourceRefs())
                 .build();
 
@@ -88,12 +103,17 @@ public class PricingPromotionProposalService {
         if (!decision.equals("APPROVE") && !decision.equals("REJECT")) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Decision must be APPROVE or REJECT");
         }
+        if (actor.equals(proposal.getCreatedBy())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Creator cannot review own proposal");
+        }
+        requireStatus(proposal, "PENDING_REVIEW");
+        requireNotExpired(proposal);
 
         proposal.setStatus(decision.equals("APPROVE") ? "APPROVED" : "REJECTED");
-        proposal.setReviewerUsername(request.reviewerUsername() == null || request.reviewerUsername().isBlank() ? "system" : request.reviewerUsername());
+        proposal.setReviewerUsername(actor);
         proposal.setReviewComment(request.reviewComment() == null || request.reviewComment().isBlank() ? "No comment provided." : request.reviewComment());
         proposal.setDecidedAt(LocalDateTime.now());
-        PricingPromotionProposal saved = proposalRepository.save(proposal);
+        PricingPromotionProposal saved = saveOrConflict(proposal);
         auditEventService.log("REVIEW", "PRICING_PROPOSAL", saved.getId(), saved.getStoreId(), actor, "Decision: " + saved.getStatus());
         return saved;
     }
@@ -104,15 +124,72 @@ public class PricingPromotionProposalService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Proposal not found: " + proposalId));
         requireInScope(proposal, scope);
 
-        if (!"APPROVED".equalsIgnoreCase(proposal.getStatus())) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Only approved proposals can be applied");
-        }
+        requireStatus(proposal, "APPROVED");
+        requireNotExpired(proposal);
+        Product product = productRepository.findBySku(proposal.getTargetSku())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT, "Product no longer exists: " + proposal.getTargetSku()));
+        BigDecimal oldPrice = product.getPrice();
+        BigDecimal price = newPrice(product, proposal.getProposedValues());
 
+        // ponytail: product price is global, not per store; per-store pricing needs its own table.
+        product.setPrice(price);
+        productRepository.save(product);
         proposal.setStatus("APPLIED");
         proposal.setAppliedAt(LocalDateTime.now());
-        PricingPromotionProposal saved = proposalRepository.save(proposal);
-        auditEventService.log("APPLY", "PRICING_PROPOSAL", saved.getId(), saved.getStoreId(), actor, "Proposal applied to SKU " + saved.getTargetSku());
+        PricingPromotionProposal saved = saveOrConflict(proposal);
+        auditEventService.log("APPLY", "PRICING_PROPOSAL", saved.getId(), saved.getStoreId(), actor,
+                "Price of SKU " + saved.getTargetSku() + " changed " + oldPrice + " -> " + price);
         return saved;
+    }
+
+    // Accepts {"newPrice": x} or {"discountPercent": p}; result must differ from current price and fit numeric(10,2).
+    private BigDecimal newPrice(Product product, String proposedValues) {
+        JsonNode values;
+        try {
+            values = objectMapper.readTree(proposedValues);
+        } catch (JsonProcessingException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "proposedValues must be JSON");
+        }
+        BigDecimal price;
+        if (values.hasNonNull("newPrice")) {
+            price = values.get("newPrice").decimalValue();
+        } else if (values.hasNonNull("discountPercent")) {
+            BigDecimal pct = values.get("discountPercent").decimalValue();
+            if (pct.signum() <= 0 || pct.compareTo(HUNDRED) >= 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "discountPercent must be between 0 and 100");
+            }
+            price = product.getPrice().multiply(HUNDRED.subtract(pct)).divide(HUNDRED);
+        } else {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "proposedValues needs newPrice or discountPercent");
+        }
+        price = price.setScale(2, RoundingMode.HALF_UP);
+        if (price.signum() <= 0 || price.compareTo(MAX_PRICE) > 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "New price out of range");
+        }
+        if (price.compareTo(product.getPrice()) == 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "New price equals current price");
+        }
+        return price;
+    }
+
+    private PricingPromotionProposal saveOrConflict(PricingPromotionProposal proposal) {
+        try {
+            return proposalRepository.saveAndFlush(proposal);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Proposal was changed by someone else, reload and retry");
+        }
+    }
+
+    private void requireStatus(PricingPromotionProposal proposal, String status) {
+        if (!status.equals(proposal.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Proposal is " + proposal.getStatus() + ", expected " + status);
+        }
+    }
+
+    private void requireNotExpired(PricingPromotionProposal proposal) {
+        if (proposal.getExpiresAt() != null && LocalDateTime.now().isAfter(proposal.getExpiresAt())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Proposal expired at " + proposal.getExpiresAt());
+        }
     }
 
     private void requireInScope(PricingPromotionProposal proposal, Long scope) {

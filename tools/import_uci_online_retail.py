@@ -18,13 +18,16 @@ Mapping:
   (default: yesterday), so the app shows the data as fresh.
 - The TOP_PRODUCTS best-selling real products in those three countries become products with SKU "UCI-<StockCode>".
 - Every invoice line becomes a confirmed order line, shipped the next morning if that is inside the window.
-- Every line of a cancelled invoice ("C...") becomes a returned line. 1 in 5 is marked 09 (damaged, sent to
-  the vendor 3 days later), the rest 03 (good, moved back to stock the next morning).
+- A cancelled invoice ("C...") line is matched to an earlier order of the same customer and product in the same
+  store. If that order has not shipped yet, it is a customer cancel after confirmation (stock goes back the same
+  day). If it already shipped, or nothing matches, it is a return: 1 in 5 is marked 09 (damaged, sent to the
+  vendor 3 days later), the rest 03 (good, moved back to stock the next morning).
 - Snapshots: per store, product and day. End-of-day stock follows the app's reconciliation formula exactly,
   except on a few chosen days where 1-3 units go missing, so reconciliation shows real VARIANCE days.
   Stock is topped up overnight when it runs low, which shows up as the overnight gap.
 
-The SQL refuses to run twice: it stops if any "UCI-" product already exists.
+The SQL refuses to run twice: it stops if any "UCI-" product already exists. With --replace it instead deletes the
+earlier UCI orders, returns and snapshots and loads them again; UCI products stay (with any price changes made since).
 """
 
 import argparse
@@ -102,11 +105,42 @@ def sql_time(value) -> str:
     return "NULL" if value is None else f"'{value:%Y-%m-%d %H:%M:%S}'"
 
 
+def match_cancellations(orders, cancels):
+    """
+    Splits cancelled-invoice lines into customer cancels of an order not yet shipped, and returns.
+    orders: dicts with key, store, code, customer, quantity, confirmed_at, ship_at (None = not shipped in the window).
+    cancels: dicts with store, code, customer, quantity, at.
+    Returns (cancelled, returns): cancelled maps an order key to [(quantity, at), ...]; returns is a list of
+    cancel dicts (quantity possibly reduced) that become return lines.
+    """
+    open_orders = defaultdict(list)
+    for o in sorted(orders, key=lambda o: o["confirmed_at"]):
+        if o["customer"]:
+            open_orders[(o["store"], o["code"], o["customer"])].append(dict(o, left=o["quantity"]))
+    cancelled, returns = defaultdict(list), []
+    for c in sorted(cancels, key=lambda c: c["at"]):
+        left = c["quantity"]
+        candidates = open_orders.get((c["store"], c["code"], c["customer"]), []) if c["customer"] else []
+        for o in reversed(candidates):  # newest order first: a cancel usually follows the order it undoes
+            if left == 0:
+                break
+            not_shipped = o["ship_at"] is None or c["at"] < o["ship_at"]
+            if o["left"] > 0 and o["confirmed_at"] <= c["at"] and not_shipped:
+                taken = min(left, o["left"])
+                o["left"] -= taken
+                left -= taken
+                cancelled[o["key"]].append((taken, c["at"]))
+        if left > 0:
+            returns.append(dict(c, quantity=left))
+    return cancelled, returns
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("xlsx")
     parser.add_argument("out")
     parser.add_argument("--end-date", default=str(date.today() - timedelta(days=1)))
+    parser.add_argument("--replace", action="store_true", help="delete earlier UCI orders, returns and snapshots first")
     args = parser.parse_args()
     target_end = date.fromisoformat(args.end_date)
 
@@ -136,7 +170,8 @@ def main():
         invoice = number_text(cells.get("A") or "")
         quantity = int(float(cells.get("D") or 0))
         price = float(cells.get("F") or 0)
-        line = dict(invoice=invoice, code=code, quantity=quantity, at=stamp + shift, store=STORES[country])
+        customer = number_text(cells.get("G") or "")
+        line = dict(invoice=invoice, code=code, quantity=quantity, at=stamp + shift, store=STORES[country], customer=customer)
         if invoice.upper().startswith("C"):
             if quantity < 0:
                 returns.append(dict(line, quantity=-quantity))
@@ -157,20 +192,33 @@ def main():
 
     # Per store, product and day: what the reconciliation formula counts.
     confirmed = defaultdict(int)
+    customer_cancelled = defaultdict(int)
     received = defaultdict(int)
     good_moved = defaultdict(int)
     bad_sent = defaultdict(int)
-    order_rows, return_rows = [], []
     line_numbers = Counter()
     for o in sorted(orders, key=lambda o: (o["at"], o["invoice"])):
         line_numbers[o["invoice"]] += 1
-        confirmed_at = o["at"] + timedelta(minutes=10)
-        ship_day = confirmed_at.date() + timedelta(days=1)
-        shipped_at = datetime.combine(ship_day, time(10, 0)) if ship_day <= end else None
-        confirmed[(o["store"], o["code"], confirmed_at.date())] += o["quantity"]
-        order_rows.append((f"UCI-{o['invoice']}", line_numbers[o["invoice"]], o["store"], o["code"], o["quantity"],
-                           o["quantity"] if shipped_at else 0, "SHIPPED" if shipped_at else "CONFIRMED",
-                           o["at"], confirmed_at, shipped_at))
+        o["key"] = (o["invoice"], line_numbers[o["invoice"]])
+        o["confirmed_at"] = o["at"] + timedelta(minutes=10)
+        ship_day = o["confirmed_at"].date() + timedelta(days=1)
+        o["ship_at"] = datetime.combine(ship_day, time(10, 0)) if ship_day <= end else None
+    cancelled, returns = match_cancellations(orders, returns)
+
+    order_rows, return_rows = [], []
+    for o in sorted(orders, key=lambda o: (o["at"], o["key"])):
+        confirmed[(o["store"], o["code"], o["confirmed_at"].date())] += o["quantity"]
+        cancels = cancelled.get(o["key"], [])
+        qty_cancelled = sum(n for n, _ in cancels)
+        cancelled_at = max((at for _, at in cancels), default=None)
+        for n, at in cancels:
+            customer_cancelled[(o["store"], o["code"], at.date())] += n
+        remaining = o["quantity"] - qty_cancelled
+        shipped_at = o["ship_at"] if remaining > 0 else None
+        status = "CANCELLED" if remaining == 0 else ("SHIPPED" if shipped_at else "CONFIRMED")
+        order_rows.append((f"UCI-{o['invoice']}", o["key"][1], o["store"], o["code"], o["quantity"], qty_cancelled,
+                           remaining if shipped_at else 0, status, "CUSTOMER" if qty_cancelled else None,
+                           o["at"], o["confirmed_at"], cancelled_at, shipped_at))
     return_numbers = Counter()
     for r in sorted(returns, key=lambda r: (r["at"], r["invoice"])):
         return_numbers[r["invoice"]] += 1
@@ -210,7 +258,8 @@ def main():
                 sod_bal, sod_rac = bal, rac
                 held = min(sod_bal, stable("held", store, code, d, "SOD") % 3)
                 snapshot_rows.append((store, code, d, "SOD", datetime.combine(d, time(0, 0)), sod_bal, sod_rac, held))
-                eod_bal = sod_bal - need + good_moved[(store, code, d)] - shrink.get((store, code, d), 0)
+                eod_bal = (sod_bal - need + customer_cancelled[(store, code, d)] + good_moved[(store, code, d)]
+                           - shrink.get((store, code, d), 0))
                 eod_bal = max(eod_bal, 0)
                 eod_rac = sod_rac + received[(store, code, d)] - good_moved[(store, code, d)] - bad_sent[(store, code, d)]
                 held = min(eod_bal, stable("held", store, code, d, "EOD") % 3)
@@ -219,18 +268,24 @@ def main():
 
     with open(args.out, "w", encoding="utf-8", newline="\n") as out:
         out.write("-- Generated by tools/import_uci_online_retail.py. Source: UCI Online Retail II, CC BY 4.0.\n")
-        out.write("DO $$ BEGIN IF EXISTS (SELECT 1 FROM products WHERE sku LIKE 'UCI-%') THEN "
-                  "RAISE EXCEPTION 'UCI data is already loaded'; END IF; END $$;\n")
+        if args.replace:
+            out.write("DELETE FROM stock_snapshots WHERE product_id IN (SELECT id FROM products WHERE sku LIKE 'UCI-%');\n")
+            out.write("DELETE FROM order_lines WHERE order_id LIKE 'UCI-%';\n")
+            out.write("DELETE FROM return_lines WHERE return_id LIKE 'UCI-%';\n")
+        else:
+            out.write("DO $$ BEGIN IF EXISTS (SELECT 1 FROM products WHERE sku LIKE 'UCI-%') THEN "
+                      "RAISE EXCEPTION 'UCI data is already loaded (use --replace)'; END IF; END $$;\n")
         out.write("CREATE TEMP TABLE uci_product (code text PRIMARY KEY, id bigint) ON COMMIT DROP;\n")
         for code in products:
             name = descriptions[code].most_common(1)[0][0] if descriptions[code] else code
             name = name.title()[:255]
             price = round(median(prices[code]), 2)
+            sku = sql_text("UCI-" + code)
             out.write(
-                "WITH p AS (INSERT INTO products (sku, name, description, price, stock, is_essential, default_reorder_threshold, "
-                "version, created_at, updated_at) VALUES "
-                f"({sql_text('UCI-' + code)}, {sql_text(name)}, 'UCI Online Retail II, StockCode {code}', {price:.2f}, 0, false, 0, 0, now(), now()) "
-                f"RETURNING id) INSERT INTO uci_product SELECT {sql_text(code)}, id FROM p;\n")
+                "INSERT INTO products (sku, name, description, price, stock, is_essential, default_reorder_threshold, version, created_at, updated_at) "
+                f"SELECT {sku}, {sql_text(name)}, 'UCI Online Retail II, StockCode {code}', {price:.2f}, 0, false, 0, 0, now(), now() "
+                f"WHERE NOT EXISTS (SELECT 1 FROM products WHERE sku = {sku});\n"
+                f"INSERT INTO uci_product SELECT {sql_text(code)}, id FROM products WHERE sku = {sku};\n")
 
         def batches(rows, size=1000):
             for i in range(0, len(rows), size):
@@ -238,9 +293,10 @@ def main():
 
         for chunk in batches(order_rows):
             values = ",\n".join(
-                f"({sql_text(oid)}, {line}, {store}, (SELECT id FROM uci_product WHERE code = {sql_text(code)}), {qty}, {qty}, 0, "
-                f"{shipped}, {sql_text(status)}, NULL, 'STORE', {sql_time(created)}, {sql_time(confirmed_at)}, NULL, {sql_time(shipped_at)})"
-                for oid, line, store, code, qty, shipped, status, created, confirmed_at, shipped_at in chunk)
+                f"({sql_text(oid)}, {line}, {store}, (SELECT id FROM uci_product WHERE code = {sql_text(code)}), {qty}, {qty}, {qty_cancelled}, "
+                f"{shipped}, {sql_text(status)}, {sql_text(reason)}, 'STORE', {sql_time(created)}, {sql_time(confirmed_at)}, "
+                f"{sql_time(cancelled_at)}, {sql_time(shipped_at)})"
+                for oid, line, store, code, qty, qty_cancelled, shipped, status, reason, created, confirmed_at, cancelled_at, shipped_at in chunk)
             out.write("INSERT INTO order_lines (order_id, line_no, store_id, product_id, qty_ordered, qty_confirmed, qty_cancelled, "
                       "qty_shipped, status, cancel_reason, fulfilled_from, created_at, confirmed_at, cancelled_at, shipped_at) VALUES\n"
                       + values + ";\n")
@@ -264,6 +320,7 @@ def main():
                   f"VALUES ('IMPORT', 'UCI_DATASET', NULL, NULL, 'uci-import-script', {sql_text(summary)}, now());\n")
 
     per_store = Counter(row[2] for row in order_rows)
+    print(f"customer cancels: {sum(1 for row in order_rows if row[5])} order lines; returns: {len(return_rows)}", file=sys.stderr)
     print(summary, file=sys.stderr)
     print("order lines per store: " + ", ".join(f"{s}: {per_store[s]}" for s in sorted(per_store)), file=sys.stderr)
     print("shrink days: " + ", ".join(f"store {s} {d} {c} -{n}" for (s, c, d), n in sorted(shrink.items())), file=sys.stderr)

@@ -2,6 +2,7 @@ package com.example.springbootpostgresapi;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -18,9 +19,11 @@ import com.example.springbootpostgresapi.config.ApiExceptionHandler;
 import com.example.springbootpostgresapi.entity.AuditEvent;
 import com.example.springbootpostgresapi.entity.OrderLine;
 import com.example.springbootpostgresapi.entity.Product;
+import com.example.springbootpostgresapi.entity.ReturnLine;
 import com.example.springbootpostgresapi.repository.AuditEventRepository;
 import com.example.springbootpostgresapi.entity.PricingPromotionProposal;
 import com.example.springbootpostgresapi.repository.OrderLineRepository;
+import com.example.springbootpostgresapi.repository.ReturnLineRepository;
 import com.example.springbootpostgresapi.repository.StoreRepository;
 import com.example.springbootpostgresapi.repository.PricingPromotionProposalRepository;
 import com.example.springbootpostgresapi.repository.ProductRepository;
@@ -66,6 +69,9 @@ class ProductControllerIntegrationTest {
 
     @Autowired
     private OrderLineRepository orderLineRepository;
+
+    @Autowired
+    private ReturnLineRepository returnLineRepository;
 
     @Autowired
     private StoreRepository storeRepository;
@@ -994,6 +1000,46 @@ class ProductControllerIntegrationTest {
         login(name, "secret123")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.storeId", nullValue()));
+    }
+
+    @Test
+    void reconciliationRangeAnswersManyDaysInOneRequest() throws Exception {
+        String admin = tokenFor("admin", "admin123");
+        mockMvc.perform(get("/api/stores/1/reconciliation/range").param("from", "2026-11-04").param("to", "2026-11-06")
+                        .header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(3)))
+                .andExpect(jsonPath("$[0].businessDate", is("2026-11-04")))
+                .andExpect(jsonPath("$[1].status", is("VARIANCE")))
+                .andExpect(jsonPath("$[2].businessDate", is("2026-11-06")));
+        // Bounded, ordered, and scoped like the single-day endpoint.
+        mockMvc.perform(get("/api/stores/1/reconciliation/range").param("from", "2026-10-01").param("to", "2026-11-06")
+                        .header("Authorization", "Bearer " + admin))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/stores/1/reconciliation/range").param("from", "2026-11-06").param("to", "2026-11-04")
+                        .header("Authorization", "Bearer " + admin))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/stores/2/reconciliation/range").param("from", "2026-11-04").param("to", "2026-11-06")
+                        .header("Authorization", "Bearer " + tokenFor("store_manager", "manager123")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void returnBucketsCountOnlyReturnsStillWaiting() throws Exception {
+        // Seed RET-9002 (code 09, cable) was already sent to the vendor: not unavailable any more.
+        // A good return already moved back to stock is not a pending good return either.
+        Product keyboard = productRepository.findBySku("SKU-3003").orElseThrow();
+        returnLineRepository.save(ReturnLine.builder().returnId("RET-T-" + System.nanoTime()).lineNo(1)
+                .store(storeRepository.findByStoreCode("MAIN").orElseThrow()).product(keyboard)
+                .qty(7).returnCode("03").receivedAt(LocalDateTime.now().minusDays(2)).movedToBalAt(LocalDateTime.now().minusDays(1)).build());
+        String admin = tokenFor("admin", "admin123");
+        mockMvc.perform(get("/api/products/" + keyboard.getId() + "/details").param("storeId", "1").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.goodReturn", is(0)));
+        Product cable = productRepository.findBySku("SKU-2002").orElseThrow();
+        mockMvc.perform(get("/api/products/" + cable.getId() + "/details").param("storeId", "1").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.unavailable", is(0)));
     }
 
     private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {

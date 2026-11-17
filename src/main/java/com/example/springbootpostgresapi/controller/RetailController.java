@@ -23,6 +23,8 @@ public class RetailController {
     private final InventoryService inventoryService;
     private final StoreAccessService storeAccessService;
 
+    private static final int MAX_RANGE_DAYS = 31;
+
     @GetMapping("/api/stores/{id}/reconciliation")
     @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','USER')")
     public ResponseEntity<Map<String, Object>> getReconciliation(@PathVariable Long id,
@@ -31,6 +33,26 @@ public class RetailController {
         Long store = storeAccessService.resolveStore(authentication, id);
         LocalDate businessDate = date != null ? LocalDate.parse(date) : LocalDate.now();
         return ResponseEntity.ok(inventoryService.getStoreReconciliation(store, businessDate));
+    }
+
+    // One request for a chart of many days, instead of one request per day (which tripped the rate limit).
+    @GetMapping("/api/stores/{id}/reconciliation/range")
+    @PreAuthorize("hasAnyRole('ADMIN','STORE_MANAGER','USER')")
+    public ResponseEntity<List<Map<String, Object>>> getReconciliationRange(@PathVariable Long id,
+                                                                          @RequestParam String from,
+                                                                          @RequestParam String to,
+                                                                          Authentication authentication) {
+        Long store = storeAccessService.resolveStore(authentication, id);
+        LocalDate start = LocalDate.parse(from);
+        LocalDate end = LocalDate.parse(to);
+        if (start.isAfter(end)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "from must not be after to");
+        }
+        if (start.plusDays(MAX_RANGE_DAYS - 1).isBefore(end)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Range is limited to " + MAX_RANGE_DAYS + " days");
+        }
+        // ponytail: one reconciliation per day, a few queries each (about 40 ms a day). Batch the queries if ranges grow.
+        return ResponseEntity.ok(start.datesUntil(end.plusDays(1)).map(day -> inventoryService.getStoreReconciliation(store, day)).toList());
     }
 
     @GetMapping("/api/fulfillment-issues")

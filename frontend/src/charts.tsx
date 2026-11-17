@@ -9,12 +9,12 @@ export interface DayResult {
   racVariance: number | null;
 }
 
-/** Reconciliation for the last `days` days, one request per day (the API has no range endpoint). */
+/** Reconciliation for the last `days` days in one request (one request per day used to trip the rate limit). */
 export function useReconciliationRange(storeId: number, days: number, endOffset = 1) {
-  return useLoad(async () => {
-    const dates = Array.from({ length: days }, (_, i) => daysAgo(endOffset + days - 1 - i));
-    return Promise.all(dates.map((date) => api<DayResult>(`/api/stores/${storeId}/reconciliation`, { query: { date } })));
-  }, [storeId, days, endOffset]);
+  return useLoad(
+    () => api<DayResult[]>(`/api/stores/${storeId}/reconciliation/range`, { query: { from: daysAgo(endOffset + days - 1), to: daysAgo(endOffset) } }),
+    [storeId, days, endOffset],
+  );
 }
 
 const H = 200;

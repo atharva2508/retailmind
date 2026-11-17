@@ -178,11 +178,13 @@ public class InventoryService {
         int goodReturn = returnLineRepository.findByStoreId(storeId).stream()
                 .filter(line -> productId.equals(line.getProduct().getId()))
                 .filter(line -> "03".equals(line.getReturnCode()))
+                .filter(line -> line.getMovedToBalAt() == null) // good return = code 03 not yet moved back to stock
                 .mapToInt(ReturnLine::getQty)
                 .sum();
         int unavailable = returnLineRepository.findByStoreId(storeId).stream()
                 .filter(line -> productId.equals(line.getProduct().getId()))
                 .filter(line -> "09".equals(line.getReturnCode()))
+                .filter(line -> line.getSentToVendorAt() == null) // bad return = code 09 not yet sent to the vendor
                 .mapToInt(ReturnLine::getQty)
                 .sum();
 

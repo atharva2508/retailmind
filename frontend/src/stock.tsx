@@ -179,6 +179,7 @@ function LowStockTable({ items, onPick }: { items: LowStockItem[]; onPick?: (pro
             <th>Product</th>
             <th className="num">Available</th>
             <th>Status</th>
+            <th>Data</th>
             <th>As of</th>
           </tr>
         </thead>
@@ -201,6 +202,9 @@ function LowStockTable({ items, onPick }: { items: LowStockItem[]; onPick?: (pro
               <td className="num">{count(item.available)}</td>
               <td>
                 <Status value={item.status} />
+              </td>
+              <td>
+                <Status value={item.dataStatus} />
               </td>
               <td className="sub">{when(item.asOf)}</td>
             </tr>
@@ -232,7 +236,6 @@ export function Products({ storeId }: { storeId: number }) {
         <ErrorBox text={lowStock.error} />
         {lowStock.data && (
           <>
-            <Freshness status={lowStock.data[0]?.dataStatus ?? "FRESH"} asOf={lowStock.data[0]?.asOf} />
             <LowStockTable items={[...lowStock.data].sort((a, b) => a.available - b.available)} onPick={setPicked} />
           </>
         )}

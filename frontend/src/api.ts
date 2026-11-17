@@ -1,8 +1,10 @@
 // Small fetch wrapper for the RetailMind API.
-// The access token lives in memory only. The refresh token is kept in sessionStorage so a page reload
-// keeps you logged in for this tab; it is gone when the tab closes.
-// ponytail: sessionStorage is readable by any script on the page. Move the refresh token to an
-// HttpOnly cookie set by the server when this UI is deployed anywhere but a developer's machine.
+// The access token lives in memory, one per tab. The refresh token is one value shared by every tab in
+// localStorage, and is only ever used under a cross-tab lock: a refresh token works once, and two tabs
+// using the same one would look like theft to the server and end the session everywhere.
+// ponytail: localStorage is readable by any script on the page and survives a browser restart (the server
+// still ends the session 7 days after login). Move the refresh token to an HttpOnly cookie set by the
+// server when this UI is deployed anywhere but a developer's machine.
 
 export type Role = "ROLE_ADMIN" | "ROLE_STORE_MANAGER" | "ROLE_REVIEWER" | "ROLE_USER";
 
@@ -34,7 +36,7 @@ export function setSessionLostHandler(handler: () => void) {
 
 function readRefresh(): string | null {
   try {
-    return sessionStorage.getItem(REFRESH_KEY);
+    return localStorage.getItem(REFRESH_KEY);
   } catch {
     return null;
   }
@@ -42,8 +44,8 @@ function readRefresh(): string | null {
 
 function writeRefresh(token: string | null) {
   try {
-    if (token) sessionStorage.setItem(REFRESH_KEY, token);
-    else sessionStorage.removeItem(REFRESH_KEY);
+    if (token) localStorage.setItem(REFRESH_KEY, token);
+    else localStorage.removeItem(REFRESH_KEY);
   } catch {
     // storage blocked: the session simply ends on reload
   }
@@ -69,7 +71,8 @@ async function toError(response: Response): Promise<ApiError> {
     429: "Too many requests. Wait a moment and try again.",
     503: "The service is unavailable. Try again shortly.",
   };
-  return new ApiError(response.status, body.error ?? fallback[response.status] ?? `Request failed (${response.status})`, body.fields);
+  const text = response.status === 429 ? fallback[429] : body.error ?? fallback[response.status] ?? `Request failed (${response.status})`;
+  return new ApiError(response.status, text, body.fields);
 }
 
 export async function login(username: string, password: string): Promise<Session> {
@@ -95,7 +98,12 @@ export function resume(): Promise<Session | null> {
   return refreshing;
 }
 
-async function refreshOnce(): Promise<Session | null> {
+function refreshOnce(): Promise<Session | null> {
+  // Web Locks serialise refreshes across tabs; the token is read inside the lock, so each tab uses the newest one.
+  return navigator.locks ? navigator.locks.request("retailmind-refresh", refreshNow) : refreshNow();
+}
+
+async function refreshNow(): Promise<Session | null> {
   const refreshToken = readRefresh();
   if (!refreshToken) return null;
   const response = await fetch("/api/auth/refresh", {
@@ -104,7 +112,8 @@ async function refreshOnce(): Promise<Session | null> {
     body: JSON.stringify({ refreshToken }),
   });
   if (!response.ok) {
-    writeRefresh(null);
+    // Only clear the shared token if nobody replaced it meanwhile.
+    if (readRefresh() === refreshToken) writeRefresh(null);
     accessToken = null;
     return null;
   }

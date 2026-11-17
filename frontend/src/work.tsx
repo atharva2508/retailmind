@@ -430,7 +430,9 @@ export function Imports({ storeId }: { storeId: number }) {
   const history = useLoad(() => api<ImportRecord[]>("/api/admin/inventory-imports"), []);
   const [type, setType] = useState("SOD");
   const [asOf, setAsOf] = useState(today());
-  const [csv, setCsv] = useState("sku,bal,aud,rac,held\nSKU-1001,20,21,1,3\nSKU-2002,8,8,0,1\nSKU-3003,12,12,0,0");
+  const [csv, setCsv] = useState("");
+  const catalogue = useLoad(() => api<unknown[]>("/api/products"), []);
+  const needed = catalogue.data ? Math.max(1, Math.ceil(catalogue.data.length * 0.5)) : null;
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -490,8 +492,19 @@ export function Imports({ storeId }: { storeId: number }) {
           </p>
           <label>
             Rows (CSV: sku,bal,aud,rac,held)
-            <textarea value={csv} onChange={(e) => setCsv(e.target.value)} required />
+            <textarea
+              value={csv}
+              onChange={(e) => setCsv(e.target.value)}
+              required
+              aria-describedby="coverage-help"
+              placeholder={"sku,bal,aud,rac,held\nUCI-22197,120,124,4,2\n…"}
+            />
           </label>
+          <p id="coverage-help" className="sub">
+            {needed != null
+              ? `The file must cover at least ${count(needed)} of the ${count(catalogue.data!.length)} products (half). Products left out are recorded as zero stock.`
+              : "The file must cover at least half of all products."}
+          </p>
           <ErrorBox text={error} />
           {result && (
             <p className="success" role="status">

@@ -131,7 +131,27 @@ export function VarianceChart({
         </div>
       ) : (
         <div ref={box} style={{ position: "relative" }}>
-          <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="group" aria-label={`${title}. ${varianceDays} days with a variance, ${noDataDays} without data. Use the table view for every value.`}>
+          {/* One tab stop for the whole chart; arrow keys move between days, Enter opens one. */}
+          <svg
+            width={W}
+            height={H}
+            viewBox={`0 0 ${W} ${H}`}
+            tabIndex={0}
+            role="group"
+            aria-label={`${title}. ${varianceDays} days with a variance, ${noDataDays} without data. Use left and right arrow keys to read each day${onPick ? ", Enter to open it" : ""}.`}
+            onFocus={() => setHover((current) => current ?? data.length - 1)}
+            onBlur={() => setHover(null)}
+            onKeyDown={(e) => {
+              const last = data.length - 1;
+              const move: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1 };
+              if (e.key in move) setHover((current) => Math.min(last, Math.max(0, (current ?? last) + move[e.key])));
+              else if (e.key === "Home") setHover(0);
+              else if (e.key === "End") setHover(last);
+              else if ((e.key === "Enter" || e.key === " ") && onPick && hover != null) onPick(data[hover].businessDate);
+              else return;
+              e.preventDefault();
+            }}
+          >
             {ticks.map((t) => (
               <g key={t}>
                 <line className={t === 0 ? "zero-line" : "grid-line"} x1={PAD.left} x2={W - PAD.right} y1={y(t)} y2={y(t)} />
@@ -148,20 +168,10 @@ export function VarianceChart({
                 <g
                   key={d.businessDate}
                   className={`col ${hover === i || picked ? "active" : ""}`}
-                  tabIndex={0}
-                  role="img"
-                  aria-label={`${day(d.businessDate)}: ${v == null ? "no snapshot" : v === 0 ? "balanced" : `${signed(v)} units`}`}
+                  aria-hidden="true"
                   onPointerEnter={() => setHover(i)}
                   onPointerLeave={() => setHover(null)}
-                  onFocus={() => setHover(i)}
-                  onBlur={() => setHover(null)}
                   onClick={() => onPick?.(d.businessDate)}
-                  onKeyDown={(e) => {
-                    if (onPick && (e.key === "Enter" || e.key === " ")) {
-                      e.preventDefault();
-                      onPick(d.businessDate);
-                    }
-                  }}
                   style={{ cursor: onPick ? "pointer" : "default" }}
                 >
                   <rect className="bar-hit" x={PAD.left + band * i} y={PAD.top} width={band} height={plotH} />
@@ -179,6 +189,9 @@ export function VarianceChart({
               );
             })}
           </svg>
+          <p className="sr-only" aria-live="polite">
+            {tip && hover != null ? `${day(tip.businessDate)}: ${values[hover] == null ? "no snapshot" : values[hover] === 0 ? "balanced" : `${signed(values[hover]!)} units`}` : ""}
+          </p>
           {tip && hover != null && (
             <div className="chart-tip" style={{ left: `${((PAD.left + band * hover + band / 2) / W) * 100}%`, top: 0 }}>
               <strong>{values[hover] == null ? "No snapshot" : values[hover] === 0 ? "Balanced" : `${signed(values[hover]!)} units`}</strong>

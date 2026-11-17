@@ -171,7 +171,7 @@ public class AuthService {
                 .password(user.getPassword())
                 .authorities(user.getRole())
                 .build();
-        return new AuthResponse(jwtService.generateAccessToken(userDetails), rawRefreshToken, user.getUsername(), user.getRole());
+        return new AuthResponse(jwtService.generateAccessToken(userDetails), rawRefreshToken, user.getUsername(), user.getRole(), user.getStoreId());
     }
 
     private record Attempts(int failures, Instant lockedUntil, Instant lastFailure) {}

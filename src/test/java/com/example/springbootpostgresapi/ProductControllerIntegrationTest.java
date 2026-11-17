@@ -983,6 +983,19 @@ class ProductControllerIntegrationTest {
         }
     }
 
+    @Test
+    void loginTellsTheClientItsStore() throws Exception {
+        // The UI needs the store id for paths like /api/stores/{id}/reconciliation.
+        login("store_manager", "manager123")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.storeId", is(1)));
+        String name = "nostorelogin_" + System.nanoTime();
+        register(name);
+        login(name, "secret123")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.storeId", nullValue()));
+    }
+
     private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {
         return mockMvc.perform(put("/api/products/" + product.getId()).header("Authorization", "Bearer " + adminToken)
                 .contentType(MediaType.APPLICATION_JSON)

@@ -75,6 +75,21 @@ public class ClaudeChatService {
         return tools().stream().map(BetaTool::name).toList();
     }
 
+    /** The same tools as plain name, description and JSON schema, for the MCP endpoint. */
+    public List<Map<String, Object>> toolDefinitions() {
+        return TOOLS.stream().map(def -> {
+            Map<String, Object> schema = new LinkedHashMap<>();
+            schema.put("type", "object");
+            schema.put("properties", def.properties());
+            schema.put("required", def.required());
+            Map<String, Object> tool = new LinkedHashMap<>();
+            tool.put("name", def.name());
+            tool.put("description", def.description());
+            tool.put("inputSchema", schema);
+            return tool;
+        }).toList();
+    }
+
     public Map<String, Object> answer(String message, Long storeId, String conversationId) {
         MessageCreateParams.Builder request = MessageCreateParams.builder()
                 .model(model)
@@ -201,33 +216,39 @@ public class ClaudeChatService {
         return existing;
     }
 
-    private List<BetaTool> tools() {
-        Map<String, Object> date = Map.of("type", "string", "description", "Date as yyyy-MM-dd.");
-        return List.of(
-                tool("getLowStockProducts",
+    private record ToolDef(String name, String description, Map<String, Object> properties, List<String> required) {}
+
+    private static final Map<String, Object> DATE = Map.of("type", "string", "description", "Date as yyyy-MM-dd.");
+
+    // Single source of truth for the tools: Claude (API) and the MCP endpoint both read this list.
+    private static final List<ToolDef> TOOLS = List.of(
+                new ToolDef("getLowStockProducts",
                         "Products of this store whose available stock is at or below their reorder threshold, or zero. "
                                 + "Each item has sku, name, available, status (AT_RISK or OUT_OF_STOCK), absent, asOf and dataStatus. "
                                 + "An empty list means nothing is low, or that the store has no data: check the dashboard summary to tell which.",
                         Map.of(), List.of()),
-                tool("getDashboardSummary",
+                new ToolDef("getDashboardSummary",
                         "One overview of this store: low-stock count and items, fulfillment issues, pending pricing proposals, "
                                 + "today's reconciliation, overall status and dataStatus. Use it for broad questions like 'how is the store doing'.",
                         Map.of(), List.of()),
-                tool("getDiscountSuggestions",
+                new ToolDef("getDiscountSuggestions",
                         "Suggested discounts for low-stock products of this store. Suggestions only: nothing is created or changed.",
                         Map.of(), List.of()),
-                tool("getDailyReconciliation",
+                new ToolDef("getDailyReconciliation",
                         "Compares expected and actual end-of-day stock for one business date. Status is OK, VARIANCE or NO_DATA. "
                                 + "Defaults to today when no date is given.",
-                        Map.of("date", date), List.of()),
-                tool("getFulfillmentIssues",
+                        Map.of("date", DATE), List.of()),
+                new ToolDef("getFulfillmentIssues",
                         "Order lines the store could not find and good returns not yet moved back to stock, within a date range. "
                                 + "Defaults to the last 7 days.",
-                        Map.of("from", date, "to", date), List.of()),
-                tool("getProductDetails",
+                        Map.of("from", DATE, "to", DATE), List.of()),
+                new ToolDef("getProductDetails",
                         "Stock buckets for one product in this store: available, inCheckout, hold, goodReturn, unavailable, "
                                 + "plus asOf and dataStatus. Needs the numeric product id, which low-stock items include as productId.",
                         Map.of("productId", Map.of("type", "integer", "description", "Numeric product id.")), List.of("productId")));
+
+    private List<BetaTool> tools() {
+        return TOOLS.stream().map(def -> tool(def.name(), def.description(), def.properties(), def.required())).toList();
     }
 
     private BetaTool tool(String name, String description, Map<String, Object> properties, List<String> required) {

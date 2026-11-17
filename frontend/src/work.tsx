@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api, Session } from "./api";
-import { Badge, Card, ErrorBox, Loading, message, today, useLoad, when } from "./ui";
+import { Card, count, ErrorBox, Icon, Loading, message, PageHead, Status, STORES, today, useLoad, when } from "./ui";
 
 interface Proposal {
   id: number | null;
@@ -60,18 +60,20 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
 
   return (
     <>
-      <div className="page-head">
-        <h1>Pricing proposals</h1>
-        <button className="secondary" type="button" onClick={list.reload}>
-          Refresh
-        </button>
-      </div>
-      <p className="muted">
-        A price changes only when a store manager proposes it, a reviewer approves it, and an admin applies it. Nobody can approve their own proposal.
-      </p>
+      <PageHead
+        eyebrow={STORES[storeId] ?? `Store ${storeId}`}
+        title="Pricing proposals"
+        lede="A price changes only when a store manager proposes it, a reviewer approves it, and an admin applies it. Nobody can approve their own proposal."
+        actions={
+          <button className="btn btn-ghost" type="button" onClick={list.reload}>
+            Refresh
+          </button>
+        }
+      />
       {notice && (
         <p className="success" role="status">
-          {notice}
+          <Icon name="check" />
+          <span>{notice}</span>
         </p>
       )}
       <ErrorBox text={actionError} />
@@ -89,10 +91,10 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
         />
       )}
 
-      <Card title={`Suggested discounts for store ${storeId}`}>
+      <Card title="Suggested discounts" sub="Low-stock products in this store">
         <Loading show={suggestions.loading} />
         <ErrorBox text={suggestions.error} />
-        {suggestions.data && suggestions.data.length === 0 && <p className="muted">No low-stock products to suggest a discount for.</p>}
+        {suggestions.data && suggestions.data.length === 0 && <p className="sub">No low-stock products to suggest a discount for.</p>}
         {suggestions.data && suggestions.data.length > 0 && (
           <div className="table-wrap">
             <table>
@@ -103,7 +105,7 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
                   <th>Suggestion</th>
                   {canCreate && (
                     <th>
-                      <span className="skip">Actions</span>
+                      <span className="sr-only">Actions</span>
                     </th>
                   )}
                 </tr>
@@ -117,7 +119,7 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
                     {canCreate && (
                       <td>
                         <button
-                          className="secondary"
+                          className="btn btn-ghost btn-sm"
                           type="button"
                           onClick={() => {
                             const parsed = JSON.parse(s.proposedValues) as { discountPercent?: number };
@@ -139,7 +141,7 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
       <Card title="All proposals">
         <Loading show={list.loading} />
         <ErrorBox text={list.error} />
-        {list.data && visible.length === 0 && <p className="muted">No proposals yet.</p>}
+        {list.data && visible.length === 0 && <p className="sub">No proposals yet.</p>}
         {visible.length > 0 && (
           <div className="table-wrap">
             <table>
@@ -153,7 +155,7 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
                   <th>Reviewed by</th>
                   <th>Expires</th>
                   <th>
-                    <span className="skip">Actions</span>
+                    <span className="sr-only">Actions</span>
                   </th>
                 </tr>
               </thead>
@@ -164,32 +166,32 @@ export function Proposals({ storeId, session }: { storeId: number; session: Sess
                     <td>{p.targetSku}</td>
                     <td>
                       {describeChange(p.proposedValues, p.basePrice)}
-                      <div className="muted">{p.rationale}</div>
+                      <div className="sub">{p.rationale}</div>
                     </td>
                     <td>
-                      <Badge value={p.status} />
+                      <Status value={p.status} />
                     </td>
                     <td>{p.createdBy ?? p.creatorType}</td>
                     <td>
                       {p.reviewerUsername ?? "–"}
-                      {p.reviewComment && <div className="muted">{p.reviewComment}</div>}
+                      {p.reviewComment && <div className="sub">{p.reviewComment}</div>}
                     </td>
                     <td>{when(p.expiresAt)}</td>
                     <td>
                       <div className="actions">
                         {canReview && p.status === "PENDING_REVIEW" && p.createdBy !== session.username && (
                           <>
-                            <button className="primary" type="button" onClick={() => act(`Proposal ${p.id} approved.`, () => review(p.id!, "APPROVE"))}>
+                            <button className="btn btn-primary" type="button" onClick={() => act(`Proposal ${p.id} approved.`, () => review(p.id!, "APPROVE"))}>
                               Approve
                             </button>
-                            <button className="danger" type="button" onClick={() => act(`Proposal ${p.id} rejected.`, () => review(p.id!, "REJECT"))}>
+                            <button className="btn btn-danger btn-sm" type="button" onClick={() => act(`Proposal ${p.id} rejected.`, () => review(p.id!, "REJECT"))}>
                               Reject
                             </button>
                           </>
                         )}
                         {canApply && p.status === "APPROVED" && (
                           <button
-                            className="primary"
+                            className="btn btn-primary"
                             type="button"
                             onClick={() => {
                               if (window.confirm(`Apply proposal ${p.id}? This changes the live price of ${p.targetSku} in every store.`)) {
@@ -306,7 +308,7 @@ function NewProposal({ storeId, draft, onCreated }: { storeId: number; draft: { 
         </label>
         <ErrorBox text={error} />
         <div className="actions">
-          <button className="primary" type="submit" disabled={busy}>
+          <button className="btn btn-primary" type="submit" disabled={busy}>
             {busy ? "Creating…" : "Create proposal"}
           </button>
         </div>
@@ -362,21 +364,30 @@ export function Chat({ storeId }: { storeId: number }) {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Ask RetailMind</h1>
-      </div>
-      <p className="muted">Read-only questions about store {storeId}: low stock, overall status, reconciliation, fulfillment issues, a product by id.</p>
+      <PageHead
+        eyebrow={STORES[storeId] ?? `Store ${storeId}`}
+        title="Ask RetailMind"
+        lede="Read-only questions about this store. It can look things up but never changes stock, prices or orders."
+      />
       <Card title="Conversation">
         <div className="chat-log" aria-live="polite">
-          {lines.length === 0 && <p className="muted">Try: "Which products are running low?"</p>}
+          {lines.length === 0 && (
+            <div className="suggestions">
+              {["Which products are running low?", "Give me the dashboard summary", "Show reconciliation", "Any fulfillment issues?"].map((q) => (
+                <button key={q} type="button" className="chip" onClick={() => setText(q)}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
           {lines.map((line, index) => (
             <div key={index} className={`bubble ${line.from}`}>
-              <span className="skip">{line.from === "me" ? "You:" : "RetailMind:"}</span>
+              <span className="sr-only">{line.from === "me" ? "You:" : "RetailMind:"}</span>
               {line.text}
               {line.meta && <span className="meta">{line.meta}</span>}
             </div>
           ))}
-          {busy && <p className="muted">Thinking…</p>}
+          {busy && <p className="sub">Thinking…</p>}
           <div ref={end} />
         </div>
         <ErrorBox text={error} />
@@ -385,7 +396,7 @@ export function Chat({ storeId }: { storeId: number }) {
             Your question
             <input value={text} onChange={(e) => setText(e.target.value)} maxLength={2000} disabled={busy} required />
           </label>
-          <button className="primary" type="submit" disabled={busy}>
+          <button className="btn btn-primary" type="submit" disabled={busy}>
             Send
           </button>
         </form>
@@ -454,10 +465,8 @@ export function Imports({ storeId }: { storeId: number }) {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Inventory imports</h1>
-      </div>
-      <Card title={`Import a snapshot for store ${storeId}`}>
+      <PageHead eyebrow={STORES[storeId] ?? `Store ${storeId}`} title="Inventory imports" lede="Load a start-of-day or end-of-day stock file for this store." />
+      <Card title="Import a snapshot">
         <form onSubmit={submit}>
           <div className="row">
             <label>
@@ -476,7 +485,7 @@ export function Imports({ storeId }: { storeId: number }) {
               <input value={fileName} readOnly aria-describedby="file-name-help" />
             </label>
           </div>
-          <p id="file-name-help" className="muted">
+          <p id="file-name-help" className="sub">
             The file name is built from the store, date and type, as the API requires. Products missing from the file are recorded as zero stock.
           </p>
           <label>
@@ -486,11 +495,12 @@ export function Imports({ storeId }: { storeId: number }) {
           <ErrorBox text={error} />
           {result && (
             <p className="success" role="status">
+              <Icon name="check" />
               Imported {result.rowCount} rows. Unknown SKUs: {result.unknownSkuCount}. Products not in the file, set to zero: {result.missingSkuCount}.
             </p>
           )}
           <div className="actions">
-            <button className="primary" type="submit" disabled={busy}>
+            <button className="btn btn-primary" type="submit" disabled={busy}>
               {busy ? "Importing…" : "Import"}
             </button>
           </div>
@@ -499,7 +509,7 @@ export function Imports({ storeId }: { storeId: number }) {
       <Card title="Recent imports">
         <Loading show={history.loading} />
         <ErrorBox text={history.error} />
-        {history.data && history.data.length === 0 && <p className="muted">No imports yet.</p>}
+        {history.data && history.data.length === 0 && <p className="sub">No imports yet.</p>}
         {history.data && history.data.length > 0 && (
           <div className="table-wrap">
             <table>
@@ -523,7 +533,7 @@ export function Imports({ storeId }: { storeId: number }) {
                     <td>{record.asOf}</td>
                     <td className="num">{record.rowCount}</td>
                     <td>
-                      <Badge value={record.status} />
+                      <Status value={record.status} />
                     </td>
                     <td>{when(record.receivedAt)}</td>
                   </tr>
@@ -552,17 +562,19 @@ export function Audit() {
   const { data, error, loading, reload } = useLoad(() => api<AuditEvent[]>("/api/audit/events"), []);
   return (
     <>
-      <div className="page-head">
-        <h1>Audit trail</h1>
-        <button className="secondary" type="button" onClick={reload}>
-          Refresh
-        </button>
-      </div>
-      <p className="muted">Newest 200 events you are allowed to see. Entries cannot be changed or deleted.</p>
+      <PageHead
+        title="Audit trail"
+        lede="Newest 200 events you are allowed to see. Entries cannot be changed or deleted."
+        actions={
+          <button className="btn btn-ghost" type="button" onClick={reload}>
+            Refresh
+          </button>
+        }
+      />
       <Loading show={loading} />
       <ErrorBox text={error} />
       {data && (
-        <Card title={`${data.length} events`}>
+        <Card title={`${count(data.length)} events`}>
           <div className="table-wrap">
             <table>
               <thead>

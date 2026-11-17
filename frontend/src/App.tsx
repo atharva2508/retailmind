@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { login, logout, resume, Role, Session, setSessionLostHandler } from "./api";
-import { ErrorBox, message, ScreenBoundary } from "./ui";
+import { ErrorBox, Icon, message, ScreenBoundary, STORES, useTheme } from "./ui";
 import { Dashboard, Fulfillment, Products, Reconciliation } from "./stock";
 import { Audit, Chat, Imports, Proposals } from "./work";
 
@@ -10,15 +10,15 @@ const ALL: Role[] = ["ROLE_ADMIN", "ROLE_STORE_MANAGER", "ROLE_REVIEWER", "ROLE_
 
 // Mirrors the @PreAuthorize rules of the API, so nobody is shown a screen that would only answer 403.
 // The API still enforces every rule; this list only decides what the menu shows.
-const SCREENS: { id: ScreenId; label: string; roles: Role[] }[] = [
-  { id: "dashboard", label: "Dashboard", roles: ALL },
-  { id: "products", label: "Products & stock", roles: ALL },
-  { id: "reconciliation", label: "Reconciliation", roles: ["ROLE_ADMIN", "ROLE_STORE_MANAGER", "ROLE_USER"] },
-  { id: "fulfillment", label: "Fulfillment issues", roles: ALL },
-  { id: "proposals", label: "Pricing proposals", roles: ALL },
-  { id: "chat", label: "Ask RetailMind", roles: ALL },
-  { id: "imports", label: "Inventory imports", roles: ["ROLE_ADMIN"] },
-  { id: "audit", label: "Audit trail", roles: ["ROLE_ADMIN", "ROLE_STORE_MANAGER", "ROLE_REVIEWER"] },
+const SCREENS: { id: ScreenId; label: string; icon: string; group: string; roles: Role[] }[] = [
+  { id: "dashboard", label: "Overview", icon: "dashboard", group: "Store", roles: ALL },
+  { id: "products", label: "Products & stock", icon: "box", group: "Store", roles: ALL },
+  { id: "reconciliation", label: "Reconciliation", icon: "scale", group: "Store", roles: ["ROLE_ADMIN", "ROLE_STORE_MANAGER", "ROLE_USER"] },
+  { id: "fulfillment", label: "Fulfillment", icon: "truck", group: "Store", roles: ALL },
+  { id: "proposals", label: "Pricing proposals", icon: "tag", group: "Work", roles: ALL },
+  { id: "chat", label: "Ask RetailMind", icon: "chat", group: "Work", roles: ALL },
+  { id: "imports", label: "Inventory imports", icon: "upload", group: "Admin", roles: ["ROLE_ADMIN"] },
+  { id: "audit", label: "Audit trail", icon: "list", group: "Admin", roles: ["ROLE_ADMIN", "ROLE_STORE_MANAGER", "ROLE_REVIEWER"] },
 ];
 
 const ROLE_NAMES: Record<Role, string> = {
@@ -31,6 +31,7 @@ const ROLE_NAMES: Record<Role, string> = {
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [starting, setStarting] = useState(true);
+  const [theme, toggleTheme] = useTheme();
 
   useEffect(() => {
     setSessionLostHandler(() => setSession(null));
@@ -44,11 +45,24 @@ export default function App() {
   return (
     <Shell
       session={session}
+      theme={theme}
+      onToggleTheme={toggleTheme}
       onLogout={async () => {
         await logout();
         setSession(null);
       }}
     />
+  );
+}
+
+function Brand() {
+  return (
+    <div className="brand">
+      <span className="brand-mark" aria-hidden="true">
+        <Icon name="box" size={16} />
+      </span>
+      RetailMind
+    </div>
   );
 }
 
@@ -74,8 +88,11 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   return (
     <div className="login-wrap">
       <main className="card login">
-        <h1>RetailMind</h1>
-        <p className="muted">Sign in with your store account.</p>
+        <Brand />
+        <div>
+          <h1>Sign in</h1>
+          <p className="muted">Store operations: stock, reconciliation, pricing.</p>
+        </div>
         <form onSubmit={submit}>
           <label>
             Username
@@ -86,7 +103,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
           </label>
           <ErrorBox text={error} />
-          <button className="primary" type="submit" disabled={busy}>
+          <button className="btn btn-primary" type="submit" disabled={busy}>
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>
@@ -95,8 +112,9 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
   );
 }
 
-function Shell({ session, onLogout }: { session: Session; onLogout: () => void }) {
+function Shell({ session, theme, onToggleTheme, onLogout }: { session: Session; theme: "light" | "dark"; onToggleTheme: () => void; onLogout: () => void }) {
   const screens = SCREENS.filter((screen) => screen.roles.includes(session.role));
+  const groups = [...new Set(screens.map((s) => s.group))];
   const [screen, setScreen] = useState<ScreenId>("dashboard");
   const isAdmin = session.role === "ROLE_ADMIN";
   // Admin may look at any store. Everyone else is fixed to their own store by the API anyway.
@@ -109,48 +127,68 @@ function Shell({ session, onLogout }: { session: Session; onLogout: () => void }
         Skip to content
       </a>
       <aside className="sidebar">
-        <div className="brand">RetailMind</div>
+        <Brand />
         <nav aria-label="Main">
           <ul>
-            {screens.map((item) => (
-              <li key={item.id}>
-                <button type="button" aria-current={screen === item.id ? "page" : undefined} onClick={() => setScreen(item.id)}>
-                  {item.label}
-                </button>
+            {groups.map((group) => (
+              <li key={group} className="nav-group">
+                <span className="nav-label">{group}</span>
+                <ul>
+                  {screens
+                    .filter((s) => s.group === group)
+                    .map((item) => (
+                      <li key={item.id}>
+                        <button type="button" className="nav-item" aria-current={screen === item.id ? "page" : undefined} onClick={() => setScreen(item.id)}>
+                          <Icon name={item.icon} />
+                          {item.label}
+                        </button>
+                      </li>
+                    ))}
+                </ul>
               </li>
             ))}
           </ul>
         </nav>
-        <div className="who">
-          <span>
-            {session.username} · {ROLE_NAMES[session.role]}
-          </span>
+        <div className="account">
+          <div>
+            <div className="account-name">{session.username}</div>
+            <div className="account-role">{ROLE_NAMES[session.role]}</div>
+          </div>
           {isAdmin ? (
             <label>
               Store
               <select value={adminStore} onChange={(e) => setAdminStore(Number(e.target.value))}>
-                {/* ponytail: the API has no store list yet; seeded stores are 1-3. Add GET /api/stores when stores are managed. */}
-                <option value={1}>1 · Main</option>
-                <option value={2}>2 · North</option>
-                <option value={3}>3 · South</option>
+                {Object.entries(STORES).map(([id, name]) => (
+                  <option key={id} value={id}>
+                    {name}
+                  </option>
+                ))}
               </select>
             </label>
           ) : (
-            <span>Store {session.storeId ?? "not assigned"}</span>
+            <div className="account-role">Store: {session.storeId != null ? STORES[session.storeId] ?? session.storeId : "not assigned"}</div>
           )}
-          <button className="secondary" type="button" onClick={onLogout}>
-            Sign out
-          </button>
+          <div className="account-row">
+            <button className="btn btn-ghost btn-sm" type="button" onClick={onToggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
+              <Icon name={theme === "dark" ? "sun" : "moon"} size={14} />
+              {theme === "dark" ? "Light" : "Dark"}
+            </button>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={onLogout}>
+              <Icon name="logout" size={14} />
+              Sign out
+            </button>
+          </div>
         </div>
       </aside>
       <main id="content" tabIndex={-1}>
         {storeId == null ? (
-          <p className="notice bad" role="alert">
-            Your account has no store yet. Ask an admin to assign one; until then there is nothing to show.
-          </p>
+          <div className="banner critical" role="alert">
+            <Icon name="cross" />
+            <div>Your account has no store yet. Ask an admin to assign one; until then there is nothing to show.</div>
+          </div>
         ) : (
           <ScreenBoundary key={`${screen}-${storeId}`}>
-            <Screen id={screen} session={session} storeId={storeId} />
+            <Screen id={screen} session={session} storeId={storeId} onNavigate={setScreen} />
           </ScreenBoundary>
         )}
       </main>
@@ -158,10 +196,11 @@ function Shell({ session, onLogout }: { session: Session; onLogout: () => void }
   );
 }
 
-function Screen({ id, session, storeId }: { id: ScreenId; session: Session; storeId: number }) {
+function Screen({ id, session, storeId, onNavigate }: { id: ScreenId; session: Session; storeId: number; onNavigate: (id: ScreenId) => void }) {
+  const canReconcile = SCREENS.find((s) => s.id === "reconciliation")!.roles.includes(session.role);
   switch (id) {
     case "dashboard":
-      return <Dashboard storeId={storeId} />;
+      return <Dashboard storeId={storeId} showReconciliation={canReconcile} onOpenReconciliation={() => onNavigate("reconciliation")} />;
     case "products":
       return <Products storeId={storeId} />;
     case "reconciliation":

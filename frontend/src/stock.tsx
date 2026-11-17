@@ -1,6 +1,7 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { api } from "./api";
-import { Badge, Card, daysAgo, ErrorBox, Loading, Stat, today, useLoad, when } from "./ui";
+import { ReconciliationTrend, SegmentedBar } from "./charts";
+import { Banner, Card, count, day, daysAgo, ErrorBox, Loading, money, PageHead, Status, STORES, Tile, today, useLoad, when } from "./ui";
 
 interface LowStockItem {
   productId: number;
@@ -48,7 +49,6 @@ interface Product {
   id: number;
   sku: string;
   name: string;
-  description: string | null;
   price: number;
   isEssential: boolean;
 }
@@ -75,113 +75,134 @@ const ISSUE_NAMES: Record<string, string> = {
 export function Freshness({ status, asOf }: { status: string; asOf?: string | null }) {
   if (status === "STALE") {
     return (
-      <p className="notice" role="status">
-        Stock data is out of date. Latest snapshot: {when(asOf)}. Refresh the inventory feed before acting on these numbers.
-      </p>
+      <Banner tone="warning">
+        <strong>Stock data is out of date.</strong> Latest snapshot {when(asOf)}. Refresh the inventory feed before acting on these numbers.
+      </Banner>
     );
   }
   if (status === "NO_DATA") {
     return (
-      <p className="notice bad" role="status">
-        No stock snapshot for this store yet. Zero here means unknown, not empty shelves.
-      </p>
+      <Banner tone="critical">
+        <strong>No stock snapshot for this store yet.</strong> Zero here means unknown, not empty shelves.
+      </Banner>
     );
   }
   return null;
 }
 
-export function Dashboard({ storeId }: { storeId: number }) {
+export function Dashboard({ storeId, showReconciliation, onOpenReconciliation }: { storeId: number; showReconciliation: boolean; onOpenReconciliation: () => void }) {
   const { data, error, loading, reload } = useLoad(() => api<Summary>("/api/dashboard/summary", { query: { storeId } }), [storeId]);
 
   return (
     <>
-      <div className="page-head">
-        <h1>Store {storeId} dashboard</h1>
-        <button className="secondary" type="button" onClick={reload}>
-          Refresh
-        </button>
-      </div>
-      <Loading show={loading} />
+      <PageHead
+        eyebrow={STORES[storeId] ?? `Store ${storeId}`}
+        title="Overview"
+        lede={data ? `Business date ${day(data.businessDate)}.` : undefined}
+        actions={
+          <button className="btn btn-ghost" type="button" onClick={reload}>
+            Refresh
+          </button>
+        }
+      />
+      <Loading show={loading && !data} />
       <ErrorBox text={error} />
       {data && (
-        <>
+        <div style={{ display: "grid", gap: 20, opacity: loading ? 0.6 : 1 }}>
           <Freshness status={data.dataStatus} asOf={data.lowStockItems[0]?.asOf} />
-          <div className="stats">
-            <Stat label="Store status" value={<Badge value={data.status} />} />
-            <Stat label="Data" value={<Badge value={data.dataStatus} />} />
-            <Stat label="Low-stock items" value={data.lowStockCount} tone={data.lowStockCount ? "warn" : undefined} />
-            <Stat label="Fulfillment issues" value={data.fulfillmentIssuesCount} tone={data.fulfillmentIssuesCount ? "warn" : undefined} />
-            <Stat label="Proposals to review" value={data.pendingProposalCount} />
-            <Stat label="Today's reconciliation" value={<Badge value={data.reconciliation.status} />} />
+          <div className="kpis">
+            <Tile label="Store status" value={<Status value={data.status} />} />
+            <Tile label="Stock data" value={<Status value={data.dataStatus} />} />
+            <Tile label="Low-stock products" value={count(data.lowStockCount)} note="at or below reorder level" />
+            <Tile label="Fulfillment issues" value={count(data.fulfillmentIssuesCount)} note="last 7 days" />
+            <Tile label="Proposals to review" value={count(data.pendingProposalCount)} />
+            <Tile label="Today's reconciliation" value={<Status value={data.reconciliation.status} />} note={data.reconciliation.status === "NO_DATA" ? "end-of-day snapshot not in yet" : undefined} />
           </div>
-          <div className="grid">
-            <Card title="What to do next">
-              <ul className="plain">
-                {data.recommendedActions.map((action) => (
-                  <li key={action}>{action}</li>
-                ))}
-              </ul>
+
+          {showReconciliation && (
+            <Card
+              title="Stock balance, last 14 days"
+              sub="End-of-day stock against what orders and returns say it should be. Below zero means units went missing."
+              actions={
+                <button className="btn btn-ghost btn-sm" type="button" onClick={onOpenReconciliation}>
+                  Open reconciliation
+                </button>
+              }
+            >
+              <ReconciliationTrend storeId={storeId} days={14} field="balVariance" title="Stock balance variance per day, last 14 days" />
             </Card>
-            <Card title="Fulfillment issues (last 7 days)">
-              {data.fulfillmentIssues.length === 0 ? (
-                <p className="muted">None.</p>
-              ) : (
+          )}
+
+          <div className="grid-2">
+            <Card title="Low stock" sub="Lowest first">
+              <LowStockTable items={[...data.lowStockItems].sort((a, b) => a.available - b.available)} />
+            </Card>
+            <div style={{ display: "grid", gap: 20, alignContent: "start" }}>
+              <Card title="What to do next">
                 <ul className="plain">
-                  {data.fulfillmentIssues.map((issue) => (
-                    <li key={issue.issueType}>
-                      {ISSUE_NAMES[issue.issueType] ?? issue.issueType}: <strong>{issue.count}</strong>
-                    </li>
+                  {data.recommendedActions.map((action) => (
+                    <li key={action}>{action}</li>
                   ))}
                 </ul>
-              )}
-            </Card>
+              </Card>
+              <Card title="Fulfillment issues" sub="Last 7 days">
+                {data.fulfillmentIssues.length === 0 ? (
+                  <p className="empty">None.</p>
+                ) : (
+                  <table>
+                    <tbody>
+                      {data.fulfillmentIssues.map((issue) => (
+                        <tr key={issue.issueType}>
+                          <td>{ISSUE_NAMES[issue.issueType] ?? issue.issueType}</td>
+                          <td className="num">{count(issue.count)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </Card>
+            </div>
           </div>
-          <Card title="Low stock">
-            <LowStockTable items={data.lowStockItems} />
-          </Card>
-        </>
+        </div>
       )}
     </>
   );
 }
 
 function LowStockTable({ items, onPick }: { items: LowStockItem[]; onPick?: (productId: number) => void }) {
-  if (items.length === 0) return <p className="muted">Nothing is at or below its reorder threshold.</p>;
+  if (items.length === 0) return <p className="empty">Nothing is at or below its reorder level.</p>;
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>SKU</th>
             <th>Product</th>
             <th className="num">Available</th>
             <th>Status</th>
-            <th>Data</th>
             <th>As of</th>
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
             <tr key={item.productId}>
-              <td>{item.sku}</td>
               <td>
                 {onPick ? (
-                  <button className="secondary" type="button" onClick={() => onPick(item.productId)}>
+                  <button className="btn-link" type="button" onClick={() => onPick(item.productId)}>
                     {item.name}
                   </button>
                 ) : (
                   item.name
                 )}
-                {item.absent && <span className="muted"> (not in last file)</span>}
+                <div className="code">
+                  {item.sku}
+                  {item.absent && " · not in last file"}
+                </div>
               </td>
-              <td className="num">{item.available}</td>
+              <td className="num">{count(item.available)}</td>
               <td>
-                <Badge value={item.status} />
+                <Status value={item.status} />
               </td>
-              <td>
-                <Badge value={item.dataStatus} />
-              </td>
-              <td>{when(item.asOf)}</td>
+              <td className="sub">{when(item.asOf)}</td>
             </tr>
           ))}
         </tbody>
@@ -194,50 +215,66 @@ export function Products({ storeId }: { storeId: number }) {
   const products = useLoad(() => api<Product[]>("/api/products"), []);
   const lowStock = useLoad(() => api<LowStockItem[]>("/api/products/low-stock", { query: { storeId } }), [storeId]);
   const [picked, setPicked] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    const list = products.data ?? [];
+    return term ? list.filter((p) => p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term)) : list;
+  }, [products.data, search]);
 
   return (
     <>
-      <div className="page-head">
-        <h1>Products & stock</h1>
-      </div>
+      <PageHead eyebrow={STORES[storeId] ?? `Store ${storeId}`} title="Products & stock" lede="Pick a product to see where its units are in this store." />
       {picked != null && <ProductDetails productId={picked} storeId={storeId} onClose={() => setPicked(null)} />}
-      <Card title={`Low stock in store ${storeId}`}>
+      <Card title="Low stock" sub="Lowest first">
         <Loading show={lowStock.loading} />
         <ErrorBox text={lowStock.error} />
         {lowStock.data && (
           <>
             <Freshness status={lowStock.data[0]?.dataStatus ?? "FRESH"} asOf={lowStock.data[0]?.asOf} />
-            <LowStockTable items={lowStock.data} onPick={setPicked} />
+            <LowStockTable items={[...lowStock.data].sort((a, b) => a.available - b.available)} onPick={setPicked} />
           </>
         )}
       </Card>
-      <Card title="All products">
+      <Card
+        title="All products"
+        sub={products.data ? `${filtered.length} of ${products.data.length}` : undefined}
+        actions={
+          <label>
+            <span className="sr-only">Search products</span>
+            <input className="search" type="search" placeholder="Search name or SKU" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </label>
+        }
+      >
         <Loading show={products.loading} />
         <ErrorBox text={products.error} />
-        {products.data && (
+        {products.data && filtered.length === 0 && <p className="empty">No product matches “{search}”.</p>}
+        {filtered.length > 0 && (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>SKU</th>
-                  <th>Name</th>
+                  <th>Product</th>
                   <th className="num">Price</th>
                   <th>Essential</th>
                   <th>
-                    <span className="skip">Actions</span>
+                    <span className="sr-only">Actions</span>
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {products.data.map((product) => (
+                {filtered.map((product) => (
                   <tr key={product.id}>
-                    <td>{product.sku}</td>
-                    <td>{product.name}</td>
-                    <td className="num">{Number(product.price).toFixed(2)}</td>
-                    <td>{product.isEssential ? "Yes" : "No"}</td>
                     <td>
-                      <button className="secondary" type="button" onClick={() => setPicked(product.id)}>
-                        Stock in store {storeId}
+                      {product.name}
+                      <div className="code">{product.sku}</div>
+                    </td>
+                    <td className="num">{money(product.price)}</td>
+                    <td>{product.isEssential ? "Yes" : "No"}</td>
+                    <td className="num">
+                      <button className="btn btn-ghost btn-sm" type="button" onClick={() => setPicked(product.id)}>
+                        View stock
                       </button>
                     </td>
                   </tr>
@@ -252,15 +289,13 @@ export function Products({ storeId }: { storeId: number }) {
 }
 
 function ProductDetails({ productId, storeId, onClose }: { productId: number; storeId: number; onClose: () => void }) {
-  const { data, error, loading } = useLoad(
-    () => api<Details>(`/api/products/${productId}/details`, { query: { storeId } }),
-    [productId, storeId],
-  );
+  const { data, error, loading } = useLoad(() => api<Details>(`/api/products/${productId}/details`, { query: { storeId } }), [productId, storeId]);
   return (
     <Card
-      title={data ? `${data.name} (${data.sku}) in store ${storeId}` : "Product stock"}
+      title={data ? data.name : "Product stock"}
+      sub={data ? `${data.sku} · ${STORES[storeId] ?? `store ${storeId}`} · as of ${when(data.asOf)}` : undefined}
       actions={
-        <button className="secondary" type="button" onClick={onClose}>
+        <button className="btn btn-ghost btn-sm" type="button" onClick={onClose}>
           Close
         </button>
       }
@@ -270,17 +305,26 @@ function ProductDetails({ productId, storeId, onClose }: { productId: number; st
       {data && (
         <>
           <Freshness status={data.dataStatus} asOf={data.asOf} />
-          <div className="stats">
-            <Stat label="Available" value={data.available} />
-            <Stat label="In checkout" value={data.inCheckout} />
-            <Stat label="On hold (confirmed, not shipped)" value={data.hold} />
-            <Stat label="Good returns (code 03)" value={data.goodReturn} />
-            <Stat label="Unavailable (bad returns, code 09)" value={data.unavailable} />
+          {data.absent && <Banner tone="warning">This product was missing from the last inventory file, so its stock is counted as zero.</Banner>}
+          <div className="kpis">
+            <Tile label="Available" value={count(data.available)} />
+            <Tile label="In checkout" value={count(data.inCheckout)} />
+            <Tile label="On hold" value={count(data.hold)} note="confirmed, not shipped" />
+            <Tile label="Good returns" value={count(data.goodReturn)} note="code 03" />
+            <Tile label="Unavailable" value={count(data.unavailable)} note="bad returns, code 09" />
           </div>
-          <p className="muted">
-            Data <Badge value={data.dataStatus} /> · as of {when(data.asOf)}
-            {data.absent && " · this product was missing from the last inventory file, so it is counted as zero"}
-          </p>
+          {data.available != null && (
+            <SegmentedBar
+              label={`Where the units of ${data.name} are`}
+              parts={[
+                { label: "Available", value: data.available ?? 0, color: "var(--series-1)" },
+                { label: "In checkout", value: data.inCheckout ?? 0, color: "var(--series-2)" },
+                { label: "On hold", value: data.hold, color: "var(--series-3)" },
+                { label: "Good returns", value: data.goodReturn, color: "var(--series-4)", lightFill: true },
+                { label: "Unavailable", value: data.unavailable, color: "var(--series-5)" },
+              ]}
+            />
+          )}
         </>
       )}
     </Card>
@@ -288,127 +332,127 @@ function ProductDetails({ productId, storeId, onClose }: { productId: number; st
 }
 
 export function Reconciliation({ storeId }: { storeId: number }) {
-  const [date, setDate] = useState(today());
-  const [asked, setAsked] = useState(today());
-  const { data, error, loading } = useLoad(
-    () => api<ReconciliationResult>(`/api/stores/${storeId}/reconciliation`, { query: { date: asked } }),
-    [storeId, asked],
-  );
+  const yesterday = daysAgo(1);
+  const [date, setDate] = useState(yesterday);
+  const [asked, setAsked] = useState(yesterday);
+  const { data, error, loading } = useLoad(() => api<ReconciliationResult>(`/api/stores/${storeId}/reconciliation`, { query: { date: asked } }), [storeId, asked]);
+  const pick = (value: string) => {
+    setDate(value);
+    setAsked(value);
+  };
 
   return (
     <>
-      <div className="page-head">
-        <h1>Daily reconciliation</h1>
-      </div>
-      <Card title="Business date">
-        <form
-          className="row"
-          onSubmit={(event: FormEvent) => {
-            event.preventDefault();
-            setAsked(date);
-          }}
-        >
-          <label>
-            Date
-            <input type="date" value={date} max={today()} onChange={(e) => setDate(e.target.value)} required />
-          </label>
-          <button className="primary" type="submit">
-            Check
-          </button>
-        </form>
-      </Card>
-      <Loading show={loading} />
-      <ErrorBox text={error} />
-      {data && (
-        <Card title={`Store ${data.storeCode}, ${data.businessDate}`}>
-          {data.status === "NO_DATA" ? (
-            <p className="notice bad" role="status">
-              No start-of-day and end-of-day snapshots for this date, so there is nothing to reconcile.
-            </p>
-          ) : (
-            <>
-              <div className="stats">
-                <Stat label="Result" value={<Badge value={data.status} />} />
-                <Stat label="Expected end-of-day BAL" value={data.expectedEodBal} />
-                <Stat label="BAL variance" value={data.balVariance} tone={data.balVariance ? "bad" : undefined} />
-                <Stat label="RAC variance" value={data.racVariance} tone={data.racVariance ? "bad" : undefined} />
-                <Stat label="Overnight gap" value={data.overnightGap} />
-              </div>
-              <p className="muted">
-                Expected BAL = start-of-day BAL − confirmed + customer cancels after confirmation + good returns moved back. Snapshot as of{" "}
-                {when(data.asOf)}.
-              </p>
-            </>
-          )}
+      <PageHead
+        eyebrow={STORES[storeId] ?? `Store ${storeId}`}
+        title="Reconciliation"
+        lede="Expected end-of-day stock = start-of-day stock − confirmed orders + customer cancels after confirmation + good returns moved back."
+      />
+      <div className="grid-2">
+        <Card title="Stock balance (BAL), last 28 days" sub="Click a day to open it below.">
+          <ReconciliationTrend storeId={storeId} days={28} field="balVariance" title="Stock balance variance per day, last 28 days" onPick={pick} selected={asked} />
         </Card>
-      )}
+        <Card title="Returns awaiting check (RAC), last 28 days" sub="Returns received but not yet moved to stock or sent to the vendor.">
+          <ReconciliationTrend storeId={storeId} days={28} field="racVariance" title="Returns variance per day, last 28 days" onPick={pick} selected={asked} />
+        </Card>
+      </div>
+      <Card
+        title={data ? `Day detail: ${day(data.businessDate)}` : "Day detail"}
+        actions={
+          <form
+            className="row"
+            onSubmit={(event: FormEvent) => {
+              event.preventDefault();
+              setAsked(date);
+            }}
+          >
+            <label>
+              <span className="sr-only">Business date</span>
+              <input type="date" value={date} max={today()} onChange={(e) => setDate(e.target.value)} required />
+            </label>
+            <button className="btn btn-primary" type="submit">
+              Open
+            </button>
+          </form>
+        }
+      >
+        <Loading show={loading} />
+        <ErrorBox text={error} />
+        {data &&
+          (data.status === "NO_DATA" ? (
+            <Banner tone="critical">No start-of-day and end-of-day snapshots for this date, so there is nothing to reconcile.</Banner>
+          ) : (
+            <div className="kpis">
+              <Tile label="Result" value={<Status value={data.status} />} />
+              <Tile label="Expected end-of-day stock" value={count(data.expectedEodBal)} />
+              <Tile label="Stock variance" value={signedCount(data.balVariance)} note={data.balVariance ? (data.balVariance < 0 ? "units missing" : "extra units") : "balanced"} />
+              <Tile label="Returns variance" value={signedCount(data.racVariance)} />
+              <Tile label="Overnight change" value={signedCount(data.overnightGap)} note="stock added between days" />
+            </div>
+          ))}
+      </Card>
     </>
   );
+}
+
+function signedCount(value: number | null): string {
+  if (value == null) return "–";
+  return value > 0 ? `+${count(value)}` : count(value);
 }
 
 export function Fulfillment({ storeId }: { storeId: number }) {
   const [from, setFrom] = useState(daysAgo(7));
   const [to, setTo] = useState(today());
   const [range, setRange] = useState({ from: daysAgo(7), to: today() });
-  const { data, error, loading } = useLoad(
-    () => api<Issue[]>("/api/fulfillment-issues", { query: { storeId, from: range.from, to: range.to } }),
-    [storeId, range],
-  );
+  const { data, error, loading } = useLoad(() => api<Issue[]>("/api/fulfillment-issues", { query: { storeId, from: range.from, to: range.to } }), [storeId, range]);
 
   return (
     <>
-      <div className="page-head">
-        <h1>Fulfillment issues</h1>
-      </div>
-      <Card title="Date range">
-        <form
-          className="row"
-          onSubmit={(event: FormEvent) => {
-            event.preventDefault();
-            setRange({ from, to });
-          }}
-        >
-          <label>
-            From
-            <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} required />
-          </label>
-          <label>
-            To
-            <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} required />
-          </label>
-          <button className="primary" type="submit">
-            Show
-          </button>
-        </form>
-      </Card>
-      <Loading show={loading} />
-      <ErrorBox text={error} />
-      {data && (
-        <Card title={`Store ${storeId}`}>
-          {data.length === 0 ? (
-            <p className="muted">No issues in this range.</p>
+      <PageHead eyebrow={STORES[storeId] ?? `Store ${storeId}`} title="Fulfillment issues" lede="Orders the store could not find, and good returns still waiting to go back to stock." />
+      <form
+        className="row"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault();
+          setRange({ from, to });
+        }}
+      >
+        <label>
+          From
+          <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} required />
+        </label>
+        <label>
+          To
+          <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} required />
+        </label>
+        <button className="btn btn-primary" type="submit">
+          Show
+        </button>
+      </form>
+      <Card title={`${day(range.from)} to ${day(range.to)}`}>
+        <Loading show={loading} />
+        <ErrorBox text={error} />
+        {data &&
+          (data.length === 0 ? (
+            <p className="empty">No issues in this range.</p>
           ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th className="num">Count</th>
+            <table>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th className="num">Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.map((issue) => (
+                  <tr key={issue.issueType}>
+                    <td>{ISSUE_NAMES[issue.issueType] ?? issue.issueType}</td>
+                    <td className="num">{count(issue.count)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {data.map((issue) => (
-                    <tr key={issue.issueType}>
-                      <td>{ISSUE_NAMES[issue.issueType] ?? issue.issueType}</td>
-                      <td className="num">{issue.count}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      )}
+                ))}
+              </tbody>
+            </table>
+          ))}
+      </Card>
     </>
   );
 }

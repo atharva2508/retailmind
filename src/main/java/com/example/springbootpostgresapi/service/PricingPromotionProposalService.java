@@ -67,7 +67,7 @@ public class PricingPromotionProposalService {
 
     @Transactional
     public PricingPromotionProposal createProposal(CreateProposalRequest request, Long storeId, String actor, String creatorType) {
-        String sku = request.targetSku().trim();
+        String sku = request.targetSku().trim().toUpperCase(); // SKUs are stored upper case
         Product product = productRepository.findBySku(sku)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown product SKU: " + sku));
         String values = request.proposedValues() == null || request.proposedValues().isBlank() ? "{}" : request.proposedValues();

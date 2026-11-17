@@ -1042,6 +1042,15 @@ class ProductControllerIntegrationTest {
                 .andExpect(jsonPath("$.unavailable", is(0)));
     }
 
+    @Test
+    void proposalSkuIsNotCaseSensitive() throws Exception {
+        mockMvc.perform(post("/api/proposals").header("Authorization", "Bearer " + tokenFor("store_manager", "manager123"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"proposalType\":\"DISCOUNT\",\"targetSku\":\" sku-3003 \",\"proposedValues\":\"{\\\"discountPercent\\\":5}\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.targetSku", is("SKU-3003")));
+    }
+
     private ResultActions putProduct(String adminToken, Product product, String sku) throws Exception {
         return mockMvc.perform(put("/api/products/" + product.getId()).header("Authorization", "Bearer " + adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
